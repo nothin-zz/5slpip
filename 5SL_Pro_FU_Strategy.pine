@@ -1,30 +1,53 @@
 //@version=5
-indicator("5SL Pro — FU Strategy", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=200)
+indicator("5SL Pro — FU Strategy v2", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=200)
 
 // ═══════════════════════════════════════════
 // ⚙️ SETTINGS
 // ═══════════════════════════════════════════
 grp1 = "🎯 Signal Sozlamalari"
-signal_mode = input.string("Live (Qotib qoluvchi)", "Signal Rejimi",
-               options=["Live (Qotib qoluvchi)", "Yopilgan Bar"], group=grp1,
-               tooltip="'Live' — REAL-TIME, signal hozirgi narx bilan tashlanadi. 'Yopilgan Bar' — bar yopilishini kutadi (kechikadi).")
+signal_mode = input.string("Bar Yopilgan (Tavsiya)", "Signal Rejimi",
+               options=["Bar Yopilgan (Tavsiya)", "Live + Lock"], group=grp1,
+               tooltip="'Bar Yopilgan' — REPAINT YO'Q, eng aniq. 'Live + Lock' — birinchi tickda lock qiladi, lekin kamdan-kam o'zgarishi mumkin.")
 lookback    = input.int(20, "Likvidlik Lookback", minval=5, maxval=50, group=grp1)
 fu_type     = input.string("Ikkalasi", "FU Turi",
                options=["Strong FU", "ATT FU", "Ikkalasi"], group=grp1)
 
-grp2 = "💰 Risk Sozlamalari"
-user_spread = input.float(7.0, "Spread (Pips)",  minval=0,  step=0.5, group=grp2)
-sl_pips     = input.float(5.0, "SL (Pips)",      minval=1,  step=0.1, group=grp2)
-tp1_mult    = input.float(2.0, "TP1 RR",         step=0.1,            group=grp2)
-tp2_mult    = input.float(4.0, "TP2 RR",         step=0.1,            group=grp2)
-use_wick50  = input.bool(true, "Wick 50% Entry",                      group=grp2)
+// ─── Symbol turi (pip detection uchun)
+grp_sym = "🪙 Symbol Sozlamalari"
+sym_type = input.string("Auto", "Symbol Turi",
+            options=["Auto", "Forex 5-digit", "Forex 4-digit", "Gold (XAU)", "Silver (XAG)", "JPY Pair", "Index", "Crypto"],
+            group=grp_sym,
+            tooltip="Pip hisoblashga ta'sir qiladi. 'Auto' — TradingView'dan o'zi aniqlaydi.")
+manual_pip = input.float(0.0, "Manual Pip Size (0=auto)", step=0.00001, minval=0, group=grp_sym,
+              tooltip="Agar 0 dan katta bo'lsa, hamma narsani bekor qilib shu qiymat ishlatiladi.")
 
+// ─── Risk
+grp2 = "💰 Risk Sozlamalari"
+user_spread  = input.float(7.0,  "Spread (Pips)",      minval=0,  step=0.5, group=grp2)
+sl_pips      = input.float(15.0, "SL (Pips)",          minval=1,  step=0.5, group=grp2)
+min_sl_pips  = input.float(10.0, "Min SL (xavfsizlik)", minval=1,  step=0.5, group=grp2,
+                tooltip="SL hech qachon bundan kichik bo'lmaydi. Spread bilan TP juda yaqin bo'lib qolmasligi uchun.")
+tp1_mult     = input.float(2.0,  "TP1 RR",             minval=0.5, step=0.1, group=grp2)
+tp2_mult     = input.float(4.0,  "TP2 RR",             minval=0.5, step=0.1, group=grp2)
+min_rr_after_spread = input.float(1.5, "Min RR (spread'dan keyin)", minval=0.5, step=0.1, group=grp2,
+                       tooltip="TP1 spread'ni hisobga olganda kamida shu RR'da bo'lishi shart, aks holda signal o'tkazib yuboriladi.")
+
+// ─── Entry
+grp_e = "📍 Entry Tipi"
+entry_mode = input.string("Market (Hozirgi narx)", "Entry",
+              options=["Market (Hozirgi narx)", "Wick 50%", "Bar Close"],
+              group=grp_e,
+              tooltip="'Market' — telegram'ga kelganda entry = aktual narx + spread. 'Wick 50%' — limit order uchun (fitil o'rtasi).")
+
+// ─── Vizual
 grp3 = "🎨 Vizual"
-show_zones  = input.bool(true,    "FU Zona (box)",   group=grp3)
-show_sl_ln  = input.bool(true,    "SL Chizig'i",     group=grp3)
-show_tp_ln  = input.bool(true,    "TP Chiziqlari",   group=grp3)
-lbl_size    = input.string("Normal", "Label O'lchami",
-               options=["Kichik","Normal","Katta"],   group=grp3)
+show_zones   = input.bool(true,  "FU Zona",          group=grp3)
+show_sl_ln   = input.bool(true,  "SL Chizig'i",      group=grp3)
+show_tp_ln   = input.bool(true,  "TP Chiziqlari",    group=grp3)
+show_preview = input.bool(true,  "Live Preview (kulrang)", group=grp3,
+                tooltip="Live'da bar yopilmasdan ehtimoliy signalni kulrang ko'rsatadi.")
+lbl_size     = input.string("Normal", "Label O'lchami",
+                options=["Kichik","Normal","Katta"], group=grp3)
 
 // ═══════════════════════════════════════════
 // 🎨 RANGLAR
@@ -38,24 +61,63 @@ C_SL     = color.new(#FF6B6B, 60)
 C_TP     = color.new(#69FF97, 60)
 C_WHITE  = color.new(#FFFFFF, 0)
 C_GRAY   = color.new(#8896A8, 0)
+C_PREV   = color.new(#8896A8, 50)
 
 lbl_sz = lbl_size == "Kichik" ? size.small : lbl_size == "Katta" ? size.large : size.normal
 
 // ═══════════════════════════════════════════
-// 🔢 SYMBOL'GA MOSLASHGAN FORMATLASH
-// JPY juftliklarida 3 raqam, boshqalarda 5 raqam
+// 🔢 UNIVERSAL PIP DETECTION
+// Standartlar:
+//   Forex 5-digit (EURUSD): mintick=0.00001 → pip=0.0001 (×10)
+//   Forex 4-digit (legacy): mintick=0.0001  → pip=0.0001 (×1)
+//   JPY 3-digit (USDJPY):   mintick=0.001   → pip=0.01   (×10)
+//   JPY 2-digit (legacy):   mintick=0.01    → pip=0.01   (×1)
+//   Gold (XAUUSD):          mintick=0.01    → pip=0.10   (×10)
+//   Silver (XAGUSD):        mintick=0.001   → pip=0.01   (×10) yoki 0.001
+//   Index (US100, US30):    o'zgarib turadi → pip=1.0
+//   Crypto (BTCUSD):        mintick variable → pip=mintick
 // ═══════════════════════════════════════════
-price_fmt = syminfo.mintick >= 0.01  ? "#.###" :
-            syminfo.mintick >= 0.0001 ? "#.#####" :
-                                        format.mintick
+ticker_u  = str.upper(syminfo.ticker)
+auto_gold   = str.contains(ticker_u, "XAU") or str.contains(ticker_u, "GOLD")
+auto_silver = str.contains(ticker_u, "XAG") or str.contains(ticker_u, "SILVER")
+auto_jpy    = str.contains(syminfo.currency, "JPY") or str.contains(ticker_u, "JPY")
+auto_idx    = syminfo.type == "indices" or syminfo.type == "futures"
+auto_crypto = syminfo.type == "crypto"
+
+// Auto pip — bizga ma'lum bo'lgan instrumentlar uchun aniq qiymat
+auto_pip = auto_gold     ? 0.10 :
+           auto_silver   ? 0.01 :
+           auto_jpy      ? (syminfo.mintick <= 0.001 ? 0.01 : syminfo.mintick) :
+           auto_idx      ? 1.0 :
+           auto_crypto   ? syminfo.mintick :
+           // Forex: 5-digit (mintick=0.00001) yoki 4-digit (mintick=0.0001)
+           syminfo.mintick <= 0.00001 ? 0.0001 :
+           syminfo.mintick <= 0.0001  ? syminfo.mintick :
+                                        syminfo.mintick * 10
+
+selected_pip = sym_type == "Forex 5-digit" ? syminfo.mintick * 10 :
+               sym_type == "Forex 4-digit" ? syminfo.mintick :
+               sym_type == "Gold (XAU)"    ? 0.10 :
+               sym_type == "Silver (XAG)"  ? 0.01 :
+               sym_type == "JPY Pair"      ? 0.01 :
+               sym_type == "Index"         ? 1.0 :
+               sym_type == "Crypto"        ? syminfo.mintick :
+                                              auto_pip
+
+pip_size = manual_pip > 0 ? manual_pip : selected_pip
+
+// ─── Hisob
+final_sl_pips = math.max(sl_pips, min_sl_pips)
+spread_val    = user_spread   * pip_size
+sl_val        = final_sl_pips * pip_size
+
+// ─── Format (symbol'ga qarab decimal aniqlash)
+price_fmt = pip_size >= 1.0      ? "#.##" :
+            pip_size >= 0.01     ? "#.###" :
+            pip_size >= 0.0001   ? "#.#####" :
+                                    format.mintick
 
 f_price(x) => str.tostring(x, price_fmt)
-
-// Pip = 10 * mintick (5-digit broker uchun). 4-digit'da pip = mintick.
-// Ko'pchilik MT5/TV broker 5-digit, shuning uchun *10 ishlatamiz.
-pip_size   = syminfo.mintick * 10
-spread_val = user_spread * pip_size
-sl_val     = sl_pips     * pip_size
 
 // ═══════════════════════════════════════════
 // 📐 SHAM ANALIZI
@@ -63,14 +125,14 @@ sl_val     = sl_pips     * pip_size
 hi20 = ta.highest(high, lookback)[1]
 lo20 = ta.lowest(low,   lookback)[1]
 
-bull_wick  = low  - math.min(open, close)  // pastki fitil (manfiy bo'ladi)
-bear_wick  = high - math.max(open, close)  // yuqori fitil
+bull_wick  = math.min(open, close) - low   // pastki fitil (musbat)
+bear_wick  = high - math.max(open, close)  // yuqori fitil (musbat)
 body_size  = math.abs(close - open)
 avg_body   = ta.sma(body_size, 10)
 
-is_strong_bull = math.abs(bull_wick) > body_size and close > open
+is_strong_bull = bull_wick > body_size and close > open
 is_strong_bear = bear_wick > body_size and close < open
-is_att_bull    = math.abs(bull_wick) > 0 and body_size < avg_body * 0.6
+is_att_bull    = bull_wick > 0 and body_size < avg_body * 0.6
 is_att_bear    = bear_wick > 0 and body_size < avg_body * 0.6
 
 liq_bull = low  < lo20 and close > lo20
@@ -84,12 +146,21 @@ fu_bear = fu_type == "Strong FU" ? (liq_bear and is_strong_bear) :
           fu_type == "ATT FU"    ? (liq_bear and is_att_bear)    :
           liq_bear and (is_strong_bear or is_att_bear)
 
-confirmed   = signal_mode == "Yopilgan Bar" ? barstate.isconfirmed : true
-buy_signal  = fu_bull and confirmed
-sell_signal = fu_bear and confirmed
+// ═══════════════════════════════════════════
+// 🚦 SIGNAL CONFIRMATION
+// "Bar Yopilgan" — barstate.isconfirmed (REPAINT YO'Q)
+// "Live + Lock"  — barstate.isconfirmed HAM ishlaydi (lock); preview alohida ko'rsatiladi
+// ═══════════════════════════════════════════
+is_live_mode = signal_mode == "Live + Lock"
+fire_buy  = fu_bull and barstate.isconfirmed
+fire_sell = fu_bear and barstate.isconfirmed
+
+// Preview — faqat real-time tick'da, lock qilmaydi (faqat vizual)
+preview_buy  = is_live_mode and show_preview and fu_bull and not barstate.isconfirmed
+preview_sell = is_live_mode and show_preview and fu_bear and not barstate.isconfirmed
 
 // ═══════════════════════════════════════════
-// 🔒 QOTIB QOLUVCHI O'ZGARUVCHILAR
+// 🔒 PERSISTENT STATE (QOTIB QOLUVCHI)
 // ═══════════════════════════════════════════
 var float e_buy    = na
 var float sl_buy   = na
@@ -100,112 +171,168 @@ var float sl_sell  = na
 var float tp1_sell = na
 var float tp2_sell = na
 var int   dir      = 0
-var string last_symbol = syminfo.ticker
+var int   entry_bar = na
+var float entry_price_snapshot = na  // signal vaqtidagi aktual narx
 
 // ═══════════════════════════════════════════
-// 🚀 BUY
+// 🎯 ENTRY HISOBLASH FUNKSIYASI
 // ═══════════════════════════════════════════
-if buy_signal and dir == 0
-    e_buy    := (use_wick50 ? low + math.abs(bull_wick) * 0.5 : close) + spread_val
-    sl_buy   := low - sl_val
-    risk_b    = e_buy - sl_buy
-    tp1_buy  := e_buy + risk_b * tp1_mult
-    tp2_buy  := e_buy + risk_b * tp2_mult
-    dir      := 1
+calc_entry_buy(curr_close, wick_low) =>
+    raw = entry_mode == "Wick 50%"   ? wick_low + bull_wick * 0.5 :
+          entry_mode == "Bar Close"  ? curr_close :
+                                        curr_close  // Market default
+    raw + spread_val  // BUY = ask = bid + spread
 
+calc_entry_sell(curr_close, wick_high) =>
+    raw = entry_mode == "Wick 50%"   ? wick_high - bear_wick * 0.5 :
+          entry_mode == "Bar Close"  ? curr_close :
+                                        curr_close
+    raw  // SELL = bid (no spread added to entry)
+
+// ═══════════════════════════════════════════
+// 🚀 BUY — confirmed + LOCK (repaint yo'q)
+// ═══════════════════════════════════════════
+if fire_buy and dir == 0
+    e_candidate   = calc_entry_buy(close, low)
+    sl_candidate  = math.min(low, close) - sl_val  // SL — past struktura ostida
+    risk_b        = e_candidate - sl_candidate
+    tp1_candidate = e_candidate + risk_b * tp1_mult
+
+    // RR validation — spread'ni hisobga olib, TP1 hali ham foydali bo'lsinmi?
+    effective_rr  = (tp1_candidate - e_candidate) / risk_b
+    rr_ok         = effective_rr >= min_rr_after_spread and risk_b > 0
+
+    if rr_ok
+        e_buy    := e_candidate
+        sl_buy   := sl_candidate
+        tp1_buy  := tp1_candidate
+        tp2_buy  := e_buy + risk_b * tp2_mult
+        dir      := 1
+        entry_bar := bar_index
+        entry_price_snapshot := close
+
+        label.new(bar_index, low,
+             text      = "🚀 BUY" +
+                         "\nE:   " + f_price(e_buy) +
+                         "\nSL:  " + f_price(sl_buy) +
+                         "\nTP1: " + f_price(tp1_buy) +
+                         "\nTP2: " + f_price(tp2_buy),
+             color     = C_BUY_T,
+             textcolor = C_WHITE,
+             style     = label.style_label_up,
+             size      = lbl_sz)
+
+        if show_zones
+            box.new(bar_index - 1, high, bar_index + 30, low,
+                 bgcolor      = C_BUY_T,
+                 border_color = C_BUY,
+                 border_width = 1)
+
+        if show_sl_ln
+            line.new(bar_index, sl_buy, bar_index + 60, sl_buy,
+                 color = C_SL, width = 1, style = line.style_dashed)
+        if show_tp_ln
+            line.new(bar_index, tp1_buy, bar_index + 60, tp1_buy,
+                 color = C_TP,   width = 1, style = line.style_dashed)
+            line.new(bar_index, tp2_buy, bar_index + 60, tp2_buy,
+                 color = C_GOLD, width = 1, style = line.style_dotted)
+
+        // ✅ TELEGRAM ALERT — entry = real-time close (signal vaqtidagi aktual narx)
+        alert('{"signal":"BUY","symbol":"' + syminfo.ticker +
+              '","entry":"' + f_price(e_buy) +
+              '","sl":"'    + f_price(sl_buy) +
+              '","tp1":"'   + f_price(tp1_buy) +
+              '","tp2":"'   + f_price(tp2_buy) +
+              '","price":"' + f_price(close) +
+              '","tf":"'    + timeframe.period +
+              '","ts":'     + str.tostring(timenow) + '}',
+              alert.freq_once_per_bar)
+
+// ═══════════════════════════════════════════
+// 🔻 SELL — confirmed + LOCK
+// ═══════════════════════════════════════════
+if fire_sell and dir == 0
+    e_candidate   = calc_entry_sell(close, high)
+    sl_candidate  = math.max(high, close) + spread_val + sl_val
+    risk_s        = sl_candidate - e_candidate
+    tp1_candidate = e_candidate - risk_s * tp1_mult
+
+    effective_rr  = (e_candidate - tp1_candidate) / risk_s
+    rr_ok         = effective_rr >= min_rr_after_spread and risk_s > 0
+
+    if rr_ok
+        e_sell   := e_candidate
+        sl_sell  := sl_candidate
+        tp1_sell := tp1_candidate
+        tp2_sell := e_sell - risk_s * tp2_mult
+        dir      := -1
+        entry_bar := bar_index
+        entry_price_snapshot := close
+
+        label.new(bar_index, high,
+             text      = "🔻 SELL" +
+                         "\nE:   " + f_price(e_sell) +
+                         "\nSL:  " + f_price(sl_sell) +
+                         "\nTP1: " + f_price(tp1_sell) +
+                         "\nTP2: " + f_price(tp2_sell),
+             color     = C_SELL_T,
+             textcolor = C_WHITE,
+             style     = label.style_label_down,
+             size      = lbl_sz)
+
+        if show_zones
+            box.new(bar_index - 1, high, bar_index + 30, low,
+                 bgcolor      = C_SELL_T,
+                 border_color = C_SELL,
+                 border_width = 1)
+
+        if show_sl_ln
+            line.new(bar_index, sl_sell, bar_index + 60, sl_sell,
+                 color = C_SL, width = 1, style = line.style_dashed)
+        if show_tp_ln
+            line.new(bar_index, tp1_sell, bar_index + 60, tp1_sell,
+                 color = C_TP,   width = 1, style = line.style_dashed)
+            line.new(bar_index, tp2_sell, bar_index + 60, tp2_sell,
+                 color = C_GOLD, width = 1, style = line.style_dotted)
+
+        alert('{"signal":"SELL","symbol":"' + syminfo.ticker +
+              '","entry":"' + f_price(e_sell) +
+              '","sl":"'    + f_price(sl_sell) +
+              '","tp1":"'   + f_price(tp1_sell) +
+              '","tp2":"'   + f_price(tp2_sell) +
+              '","price":"' + f_price(close) +
+              '","tf":"'    + timeframe.period +
+              '","ts":'     + str.tostring(timenow) + '}',
+              alert.freq_once_per_bar)
+
+// ═══════════════════════════════════════════
+// 👁 LIVE PREVIEW (kulrang, lock qilmaydi)
+// Faqat vizual — alert yubormaydi, dir o'zgartirmaydi
+// ═══════════════════════════════════════════
+if preview_buy and dir == 0
     label.new(bar_index, low,
-         text      = "🚀 BUY" +
-                     "\nE:   " + f_price(e_buy) +
-                     "\nSL:  " + f_price(sl_buy) +
-                     "\nTP1: " + f_price(tp1_buy) +
-                     "\nTP2: " + f_price(tp2_buy),
-         color     = C_BUY_T,
+         text      = "👁 BUY?",
+         color     = C_PREV,
          textcolor = C_WHITE,
          style     = label.style_label_up,
-         size      = lbl_sz)
+         size      = size.tiny)
 
-    if show_zones
-        box.new(bar_index - 1, high, bar_index + 30, low,
-             bgcolor      = C_BUY_T,
-             border_color = C_BUY,
-             border_width = 1)
-
-    if show_sl_ln
-        line.new(bar_index, sl_buy, bar_index + 60, sl_buy,
-             color = C_SL, width = 1, style = line.style_dashed)
-    if show_tp_ln
-        line.new(bar_index, tp1_buy, bar_index + 60, tp1_buy,
-             color = C_TP,   width = 1, style = line.style_dashed)
-        line.new(bar_index, tp2_buy, bar_index + 60, tp2_buy,
-             color = C_GOLD, width = 1, style = line.style_dotted)
-
-    // ✅ TELEGRAM WEBHOOK ALERT (JSON) — real-time timestamp bilan
-    alert('{"signal":"BUY","symbol":"' + syminfo.ticker +
-          '","entry":"' + f_price(e_buy) +
-          '","sl":"'    + f_price(sl_buy) +
-          '","tp1":"'   + f_price(tp1_buy) +
-          '","tp2":"'   + f_price(tp2_buy) +
-          '","price":"' + f_price(close) +
-          '","tf":"'    + timeframe.period +
-          '","ts":'     + str.tostring(timenow) + '}',
-          alert.freq_once_per_bar)
-
-// ═══════════════════════════════════════════
-// 🔻 SELL
-// ═══════════════════════════════════════════
-if sell_signal and dir == 0
-    e_sell   := use_wick50 ? high - bear_wick * 0.5 : close
-    sl_sell  := high + spread_val + sl_val
-    risk_s    = sl_sell - e_sell
-    tp1_sell := e_sell - risk_s * tp1_mult
-    tp2_sell := e_sell - risk_s * tp2_mult
-    dir      := -1
-
+if preview_sell and dir == 0
     label.new(bar_index, high,
-         text      = "🔻 SELL" +
-                     "\nE:   " + f_price(e_sell) +
-                     "\nSL:  " + f_price(sl_sell) +
-                     "\nTP1: " + f_price(tp1_sell) +
-                     "\nTP2: " + f_price(tp2_sell),
-         color     = C_SELL_T,
+         text      = "👁 SELL?",
+         color     = C_PREV,
          textcolor = C_WHITE,
          style     = label.style_label_down,
-         size      = lbl_sz)
-
-    if show_zones
-        box.new(bar_index - 1, high, bar_index + 30, low,
-             bgcolor      = C_SELL_T,
-             border_color = C_SELL,
-             border_width = 1)
-
-    if show_sl_ln
-        line.new(bar_index, sl_sell, bar_index + 60, sl_sell,
-             color = C_SL, width = 1, style = line.style_dashed)
-    if show_tp_ln
-        line.new(bar_index, tp1_sell, bar_index + 60, tp1_sell,
-             color = C_TP,   width = 1, style = line.style_dashed)
-        line.new(bar_index, tp2_sell, bar_index + 60, tp2_sell,
-             color = C_GOLD, width = 1, style = line.style_dotted)
-
-    // ✅ TELEGRAM WEBHOOK ALERT (JSON) — real-time timestamp bilan
-    alert('{"signal":"SELL","symbol":"' + syminfo.ticker +
-          '","entry":"' + f_price(e_sell) +
-          '","sl":"'    + f_price(sl_sell) +
-          '","tp1":"'   + f_price(tp1_sell) +
-          '","tp2":"'   + f_price(tp2_sell) +
-          '","price":"' + f_price(close) +
-          '","tf":"'    + timeframe.period +
-          '","ts":'     + str.tostring(timenow) + '}',
-          alert.freq_once_per_bar)
+         size      = size.tiny)
 
 // ═══════════════════════════════════════════
-// 📊 WR + WIN/LOSS WEBHOOK ALERT
+// 📊 EXIT — FAQAT KEYINGI BAR'DAN BOSHLAB
+// (entry bar'da TP/SL urilsa ham hisoblamaydi — repaint himoyasi)
 // ═══════════════════════════════════════════
 var int total = 0
 var int wins  = 0
 
-// BUY natijasi
-if dir == 1
+if dir == 1 and bar_index > entry_bar and barstate.isconfirmed
     if high >= tp1_buy
         wins  += 1
         total += 1
@@ -224,8 +351,7 @@ if dir == 1
               '","ts":'     + str.tostring(timenow) + '}',
               alert.freq_once_per_bar)
 
-// SELL natijasi
-if dir == -1
+if dir == -1 and bar_index > entry_bar and barstate.isconfirmed
     if low <= tp1_sell
         wins   += 1
         total  += 1
@@ -253,7 +379,7 @@ wr_color = wr >= 65 ? color.new(#69FF97, 0) :
 // 📊 DASHBOARD
 // ═══════════════════════════════════════════
 var table dash = table.new(
-     position.top_right, 2, 5,
+     position.top_right, 2, 6,
      bgcolor      = color.new(#0A0E1A, 75),
      border_width = 1,
      border_color = color.new(#FFD700, 60),
@@ -261,29 +387,28 @@ var table dash = table.new(
      frame_color  = color.new(#FFD700, 40))
 
 if barstate.islast
-    table.cell(dash, 0, 0, "5SL PRO",
+    table.cell(dash, 0, 0, "5SL PRO v2",
          text_color = C_GOLD, text_size = size.small,
          bgcolor    = color.new(#FFD700, 88))
-    table.cell(dash, 1, 0,
-         signal_mode == "Live (Qotib qoluvchi)" ? "⚡ Live" : "✅ Bar",
+    table.cell(dash, 1, 0, is_live_mode ? "⚡ Live" : "✅ Bar",
          text_color = C_GRAY, text_size = size.tiny,
          bgcolor    = color.new(#FFD700, 88))
     table.cell(dash, 0, 1, "Win Rate",
-         text_color = C_GRAY,  text_size = size.tiny)
+         text_color = C_GRAY, text_size = size.tiny)
     table.cell(dash, 1, 1, str.tostring(wr, "#.#") + "%",
          text_color = wr_color, text_size = size.small)
-    table.cell(dash, 0, 2, "Jami",
-         text_color = C_GRAY,  text_size = size.tiny)
+    table.cell(dash, 0, 2, "Jami",  text_color = C_GRAY, text_size = size.tiny)
     table.cell(dash, 1, 2, str.tostring(total),
          text_color = C_WHITE, text_size = size.tiny)
-    table.cell(dash, 0, 3, "Win",
-         text_color = C_GRAY,  text_size = size.tiny)
+    table.cell(dash, 0, 3, "Win", text_color = C_GRAY, text_size = size.tiny)
     table.cell(dash, 1, 3, str.tostring(wins),
          text_color = color.new(#69FF97, 0), text_size = size.tiny)
-    table.cell(dash, 0, 4, "Loss",
-         text_color = C_GRAY,  text_size = size.tiny)
+    table.cell(dash, 0, 4, "Loss", text_color = C_GRAY, text_size = size.tiny)
     table.cell(dash, 1, 4, str.tostring(total - wins),
          text_color = color.new(#FF4C6A, 0), text_size = size.tiny)
+    table.cell(dash, 0, 5, "Pip", text_color = C_GRAY, text_size = size.tiny)
+    table.cell(dash, 1, 5, f_price(pip_size),
+         text_color = C_WHITE, text_size = size.tiny)
 
 // ═══════════════════════════════════════════
 // 📈 AKTIV SAVDO CHIZIQLARI

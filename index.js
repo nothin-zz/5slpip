@@ -116,10 +116,14 @@ function enqueue(text) {
 // ─── Xabar formatlari ────────────────────────────────────────
 function formatSignal(d) {
   const emoji = d.signal === 'BUY' ? '🚀' : '🔻';
+  // Entry va aktual narx farqini ko'rsatish (slippage transparent)
+  const slippage = d.price && d.entry
+    ? ` <i>(narx: ${escapeHtml(d.price)})</i>`
+    : '';
   return (
     `${emoji} <b>${escapeHtml(d.signal)} — ${escapeHtml(d.symbol)}</b>\n` +
     `━━━━━━━━━━━━━━━━\n` +
-    `📍 <b>Entry:</b>  <code>${escapeHtml(d.entry)}</code>\n` +
+    `📍 <b>Entry:</b>  <code>${escapeHtml(d.entry)}</code>${slippage}\n` +
     `🛑 <b>SL:</b>     <code>${escapeHtml(d.sl)}</code>\n` +
     `🎯 <b>TP1:</b>    <code>${escapeHtml(d.tp1)}</code>\n` +
     `🎯 <b>TP2:</b>    <code>${escapeHtml(d.tp2)}</code>\n` +
