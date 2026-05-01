@@ -8,8 +8,6 @@ const BOT_TOKEN = "8698600397:AAHzrvVYullbDxhrTvBtfP6MHsWUicFVwp4";   // Telegra
 const CHAT_ID   = "-1003721934768";     // Telegram chat id
 const SECRET    = "5sl" || 'mysecret'; // xavfsizlik
 
-
-// ─── Kunlik statistika ───────────────────────
 let wins   = 0;
 let losses = 0;
 let lastDay = new Date().toDateString();
@@ -23,7 +21,6 @@ function checkDayReset() {
   }
 }
 
-// ─── Telegram yuborish ───────────────────────
 async function sendTelegram(text) {
   const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
   await axios.post(url, {
@@ -33,20 +30,17 @@ async function sendTelegram(text) {
   });
 }
 
-// ─── Vaqt formati ────────────────────────────
 function getTime() {
   return new Date().toLocaleTimeString('uz-UZ', {
-    hour:   '2-digit',
-    minute: '2-digit',
+    hour:     '2-digit',
+    minute:   '2-digit',
     timeZone: 'Asia/Tashkent'
   });
 }
 
 // ─── Signal xabari ───────────────────────────
 function formatSignal(data) {
-  const emoji  = data.signal === 'BUY' ? '🚀' : '🔻';
-  const time   = getTime();
-
+  const emoji = data.signal === 'BUY' ? '🚀' : '🔻';
   return (
     `${emoji} <b>${data.signal} — ${data.symbol}</b>\n` +
     `━━━━━━━━━━━━━━━━\n` +
@@ -55,78 +49,53 @@ function formatSignal(data) {
     `🎯 <b>TP1:</b>    <code>${data.tp1}</code>\n` +
     `🎯 <b>TP2:</b>    <code>${data.tp2}</code>\n` +
     `━━━━━━━━━━━━━━━━\n` +
-    `⏱ TF: ${data.tf}m  |  🕐 ${time}\n` +
+    `⏱ TF: ${data.tf}m  |  🕐 ${getTime()}\n` +
     `━━━━━━━━━━━━━━━━\n` +
-    `🟢 Win: <b>${wins}</b>  |  🔴 Loss: <b>${losses}</b>`
+    `🟢 <b>${wins}</b>  🔴 <b>${losses}</b>`
   );
 }
 
 // ─── Natija xabari ───────────────────────────
 function formatResult(type, data) {
-  const time = getTime();
   const isWin = type === 'WIN';
-
   return (
     `${isWin ? '🟢' : '🔴'} <b>${isWin ? 'WIN' : 'LOSS'} — ${data.symbol}</b>\n` +
     `━━━━━━━━━━━━━━━━\n` +
-    `🕐 ${time}\n` +
+    `🕐 ${getTime()}\n` +
     `━━━━━━━━━━━━━━━━\n` +
-    `🟢 Win: <b>${wins}</b>  |  🔴 Loss: <b>${losses}</b>`
+    `🟢 <b>${wins}</b>  🔴 <b>${losses}</b>`
   );
 }
 
-// ─── Webhook — Signal ────────────────────────
+// ─── Signal webhook ──────────────────────────
 app.post('/webhook/:secret', async (req, res) => {
-  if (req.params.secret !== SECRET) {
+  if (req.params.secret !== SECRET)
     return res.status(403).json({ error: 'Forbidden' });
-  }
 
   const data = req.body;
-
-  if (!data.signal || !data.symbol || !data.entry) {
-    return res.status(400).json({ error: 'Invalid payload' });
-  }
-
   checkDayReset();
 
+  // Signal yoki Natija — ikkalasi ham shu endpointga keladi
   try {
-    const msg = formatSignal(data);
-    await sendTelegram(msg);
-    console.log(`✅ Signal: ${data.signal} ${data.symbol} @ ${data.entry}`);
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('❌ Xato:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+    // Natija (WIN/LOSS)
+    if (data.type === 'WIN' || data.type === 'LOSS') {
+      if (data.type === 'WIN') wins++;
+      else losses++;
+      const msg = formatResult(data.type, data);
+      await sendTelegram(msg);
+      console.log(`📊 ${data.type} | W:${wins} L:${losses}`);
+      return res.json({ ok: true, wins, losses });
+    }
 
-// ─── Webhook — Natija (WIN/LOSS) ─────────────
-app.post('/result/:secret', async (req, res) => {
-  if (req.params.secret !== SECRET) {
-    return res.status(403).json({ error: 'Forbidden' });
-  }
+    // Signal (BUY/SELL)
+    if (data.signal) {
+      const msg = formatSignal(data);
+      await sendTelegram(msg);
+      console.log(`✅ ${data.signal} ${data.symbol} @ ${data.entry}`);
+      return res.json({ ok: true });
+    }
 
-  const data = req.body;
-  // data.type = "WIN" yoki "LOSS"
-  // data.symbol = "XAUUSD"
-
-  if (!data.type || !data.symbol) {
-    return res.status(400).json({ error: 'Invalid payload' });
-  }
-
-  checkDayReset();
-
-  if (data.type === 'WIN') {
-    wins++;
-  } else {
-    losses++;
-  }
-
-  try {
-    const msg = formatResult(data.type, data);
-    await sendTelegram(msg);
-    console.log(`📊 Natija: ${data.type} | W:${wins} L:${losses}`);
-    res.json({ ok: true, wins, losses });
+    res.status(400).json({ error: 'Invalid payload' });
   } catch (err) {
     console.error('❌ Xato:', err.message);
     res.status(500).json({ error: err.message });
@@ -135,15 +104,8 @@ app.post('/result/:secret', async (req, res) => {
 
 // ─── Health check ─────────────────────────────
 app.get('/', (req, res) => {
-  res.json({
-    status: '✅ 5SL Bot ishlamoqda',
-    wins,
-    losses
-  });
+  res.json({ status: '✅ 5SL Bot ishlamoqda', wins, losses });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server port ${PORT} da ishlamoqda`);
-});
-
+app.listen(PORT, () => console.log(`🚀 Server port ${PORT} da ishlamoqda`));
