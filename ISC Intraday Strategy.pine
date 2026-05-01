@@ -1,0 +1,675 @@
+// ============================================================
+// ISC 1.0 — Intraday Strategy
+// Based on: MSNR + SMC × LIT + ICT Kill Zone + QT + SMT
+// Author: ISC Strategy | Clean & Elegant Design
+// Version: 1.0
+// ============================================================
+
+//@version=5
+indicator("ISC 1.0 — Intraday Strategy", 
+     shorttitle="ISC 1.0", 
+     overlay=true, 
+     max_boxes_count=500, 
+     max_lines_count=500, 
+     max_labels_count=500)
+
+// ============================================================
+// ██████████  INPUTS & SETTINGS
+// ============================================================
+
+// --- MSNR Settings ---
+grp_msnr = "⚡ MSNR — Key Levels"
+show_resistance   = input.bool(true,  "Show Resistance",         group=grp_msnr)
+show_support      = input.bool(true,  "Show Support",            group=grp_msnr)
+show_ocl          = input.bool(true,  "Show OCL (Open Candle Level)", group=grp_msnr)
+show_ob           = input.bool(true,  "Show Order Block (OB)",   group=grp_msnr)
+lookback_snr      = input.int(20,     "SNR Lookback Bars",       group=grp_msnr, minval=5, maxval=100)
+ob_lookback       = input.int(5,      "OB Lookback Bars",        group=grp_msnr, minval=2, maxval=20)
+
+// --- LIT Settings ---
+grp_lit = "🔑 LIT — Liquidity & Inducement"
+show_inducement   = input.bool(true,  "Show Inducement Levels",  group=grp_lit)
+show_sweep        = input.bool(true,  "Show Liquidity Sweep",    group=grp_lit)
+show_bos          = input.bool(true,  "Show BOS / ChoCh",        group=grp_lit)
+swing_len         = input.int(10,     "Swing Length (BOS/ChoCh)",group=grp_lit, minval=3, maxval=50)
+
+// --- ICT Kill Zone Settings ---
+grp_ict = "⏰ ICT Kill Zone Sessions"
+show_asia         = input.bool(true,  "Show Asia Kill Zone",     group=grp_ict)
+show_london       = input.bool(true,  "Show London Kill Zone",   group=grp_ict)
+show_ny           = input.bool(true,  "Show New York Kill Zone", group=grp_ict)
+show_asia_hl      = input.bool(true,  "Show Asia High/Low",      group=grp_ict)
+
+// Asia: 01:00–05:00 UTC+0 (London time UTC+1 da 00:00-04:00)
+asia_start        = input.int(1,  "Asia Start Hour (UTC)",   group=grp_ict, minval=0, maxval=23)
+asia_end          = input.int(5,  "Asia End Hour (UTC)",     group=grp_ict, minval=0, maxval=23)
+// London: 07:00–10:00 UTC
+lon_start         = input.int(7,  "London Start Hour (UTC)", group=grp_ict, minval=0, maxval=23)
+lon_end           = input.int(10, "London End Hour (UTC)",   group=grp_ict, minval=0, maxval=23)
+// New York: 12:00–15:00 UTC
+ny_start          = input.int(12, "NY Start Hour (UTC)",     group=grp_ict, minval=0, maxval=23)
+ny_end            = input.int(15, "NY End Hour (UTC)",       group=grp_ict, minval=0, maxval=23)
+
+// --- QT Quarterly Theory ---
+grp_qt = "🔄 QT — Quarterly Theory"
+show_qt_bg        = input.bool(true,  "Show QT Session Background", group=grp_qt)
+
+// --- Entry / Trade Settings ---
+grp_entry = "🎯 Entry — SL / TP Settings"
+atr_len           = input.int(14,    "ATR Length",             group=grp_entry)
+sl_atr_mult       = input.float(1.0, "SL ATR Multiplier",      group=grp_entry, minval=0.1, step=0.1)
+tp_rr             = input.float(3.0, "TP Risk:Reward Ratio",   group=grp_entry, minval=1.0, step=0.5)
+show_entry_labels = input.bool(true,  "Show Entry / SL / TP Labels", group=grp_entry)
+show_trade_box    = input.bool(true,  "Show Trade Zone Box",   group=grp_entry)
+
+// --- SMT Divergence ---
+grp_smt = "📊 SMT — Divergence"
+show_smt          = input.bool(true,  "Show SMT Divergence Signal", group=grp_smt)
+smt_symbol        = input.symbol("XAGUSD", "SMT Pair (e.g. XAGUSD, GBPUSD)", group=grp_smt)
+
+// --- Visual / Colors ---
+grp_col = "🎨 Colors & Style"
+col_resistance    = input.color(color.new(#FF6B6B, 20),  "Resistance Color",    group=grp_col)
+col_support       = input.color(color.new(#4ECDC4, 20),  "Support Color",       group=grp_col)
+col_ob_bear       = input.color(color.new(#FF6B6B, 60),  "Bearish OB Color",    group=grp_col)
+col_ob_bull       = input.color(color.new(#4ECDC4, 60),  "Bullish OB Color",    group=grp_col)
+col_asia_bg       = input.color(color.new(#B8B8FF, 88),  "Asia BG Color",       group=grp_col)
+col_london_bg     = input.color(color.new(#FFD93D, 88),  "London BG Color",     group=grp_col)
+col_ny_bg         = input.color(color.new(#6BCB77, 88),  "New York BG Color",   group=grp_col)
+col_buy_signal    = input.color(color.new(#4ECDC4, 0),   "Buy Signal Color",    group=grp_col)
+col_sell_signal   = input.color(color.new(#FF6B6B, 0),   "Sell Signal Color",   group=grp_col)
+col_sl            = input.color(color.new(#FF4757, 0),   "Stop Loss Color",     group=grp_col)
+col_tp            = input.color(color.new(#2ED573, 0),   "Take Profit Color",   group=grp_col)
+col_inducement    = input.color(color.new(#FFA502, 70),  "Inducement Color",    group=grp_col)
+col_sweep         = input.color(color.new(#FF6348, 0),   "Sweep Color",         group=grp_col)
+col_bos           = input.color(color.new(#FFFFFF, 30),  "BOS Line Color",      group=grp_col)
+col_smt           = input.color(color.new(#A29BFE, 0),   "SMT Divergence Color",group=grp_col)
+
+// ============================================================
+// ██████████  UTILITY FUNCTIONS
+// ============================================================
+
+// ATR
+atr = ta.atr(atr_len)
+
+// Session hour check (UTC)
+barHour = hour(time, "UTC")
+barMin  = minute(time, "UTC")
+
+inSession(startH, endH) =>
+    barHour >= startH and barHour < endH
+
+// ============================================================
+// ██████████  ICT KILL ZONES — Session Backgrounds
+// ============================================================
+
+in_asia   = inSession(asia_start, asia_end)
+in_london = inSession(lon_start, lon_end)
+in_ny     = inSession(ny_start, ny_end)
+
+// QT Daily labels
+qt_label = in_asia ? "Q1 · ASIA" : in_london ? "Q2 · LONDON" : in_ny ? "Q3 · NEW YORK" : ""
+
+bgcolor(show_qt_bg and in_asia   and show_asia   ? col_asia_bg   : na, title="Asia BG")
+bgcolor(show_qt_bg and in_london and show_london  ? col_london_bg : na, title="London BG")
+bgcolor(show_qt_bg and in_ny     and show_ny      ? col_ny_bg     : na, title="NY BG")
+
+// ============================================================
+// ██████████  ASIA HIGH / LOW
+// ============================================================
+
+var float asia_high_val = na
+var float asia_low_val  = na
+var bool  asia_set      = false
+var int   asia_start_bar = na
+
+// Reset every new day
+isNewDay = ta.change(dayofweek) != 0 or (barHour == asia_start and barMin == 0)
+if isNewDay and barHour == asia_start
+    asia_high_val := high
+    asia_low_val  := low
+    asia_set      := false
+    asia_start_bar := bar_index
+
+// Track Asia H/L during session
+if in_asia
+    if high > asia_high_val or na(asia_high_val)
+        asia_high_val := high
+    if low < asia_low_val or na(asia_low_val)
+        asia_low_val := low
+    asia_set := true
+
+// Draw Asia H/L lines after Asia session
+var line asia_h_line = na
+var line asia_l_line = na
+var label asia_h_lbl = na
+var label asia_l_lbl = na
+
+if show_asia_hl and asia_set and not in_asia and not na(asia_high_val)
+    // Extend lines
+    if not na(asia_h_line)
+        line.set_x2(asia_h_line, bar_index)
+    else
+        asia_h_line := line.new(asia_start_bar, asia_high_val, bar_index, asia_high_val,
+             color=col_london_bg, style=line.style_dashed, width=1)
+        asia_h_lbl  := label.new(bar_index, asia_high_val, "Asia H",
+             color=color.new(col_london_bg, 70), textcolor=col_london_bg,
+             style=label.style_label_left, size=size.tiny)
+
+    if not na(asia_l_line)
+        line.set_x2(asia_l_line, bar_index)
+    else
+        asia_l_line := line.new(asia_start_bar, asia_low_val, bar_index, asia_low_val,
+             color=col_asia_bg, style=line.style_dashed, width=1)
+        asia_l_lbl  := label.new(bar_index, asia_low_val, "Asia L",
+             color=color.new(col_asia_bg, 70), textcolor=col_asia_bg,
+             style=label.style_label_left, size=size.tiny)
+
+    // Update label position
+    if not na(asia_h_lbl)
+        label.set_x(asia_h_lbl, bar_index)
+    if not na(asia_l_lbl)
+        label.set_x(asia_l_lbl, bar_index)
+
+// ============================================================
+// ██████████  MSNR — Support / Resistance
+// ============================================================
+
+ph = ta.pivothigh(high, lookback_snr, lookback_snr)
+pl = ta.pivotlow(low,   lookback_snr, lookback_snr)
+
+var float resistance_level = na
+var float support_level    = na
+var int   res_bar = na
+var int   sup_bar = na
+
+if not na(ph)
+    resistance_level := ph
+    res_bar          := bar_index - lookback_snr
+
+if not na(pl)
+    support_level := pl
+    sup_bar       := bar_index - lookback_snr
+
+// Draw Resistance box
+if show_resistance and not na(resistance_level)
+    box.new(res_bar, resistance_level + atr * 0.15,
+            bar_index, resistance_level - atr * 0.05,
+            bgcolor=col_resistance, border_color=color.new(col_resistance, 40),
+            border_width=1, xloc=xloc.bar_index)
+    resistance_level := na
+
+// Draw Support box
+if show_support and not na(support_level)
+    box.new(sup_bar, support_level + atr * 0.05,
+            bar_index, support_level - atr * 0.15,
+            bgcolor=col_support, border_color=color.new(col_support, 40),
+            border_width=1, xloc=xloc.bar_index)
+    support_level := na
+
+// ============================================================
+// ██████████  MSNR — OCL (Open Candle Level)
+// ============================================================
+
+// Big bearish/bullish candle (body > 1.5x ATR) → mark open
+isBigBearish = close < open and (open - close) > atr * 1.5
+isBigBullish = close > open and (close - open) > atr * 1.5
+
+if show_ocl
+    if isBigBearish
+        line.new(bar_index, open, bar_index + 20, open,
+             color=color.new(col_resistance, 30), style=line.style_dotted, width=1)
+        label.new(bar_index, open, "OCL",
+             color=color.new(col_resistance, 80), textcolor=col_resistance,
+             style=label.style_label_right, size=size.tiny)
+
+    if isBigBullish
+        line.new(bar_index, open, bar_index + 20, open,
+             color=color.new(col_support, 30), style=line.style_dotted, width=1)
+        label.new(bar_index, open, "OCL",
+             color=color.new(col_support, 80), textcolor=col_support,
+             style=label.style_label_right, size=size.tiny)
+
+// ============================================================
+// ██████████  MSNR — Order Block (OB)
+// ============================================================
+
+// Bearish OB: last bullish candle before big bearish move
+// Bullish OB: last bearish candle before big bullish move
+
+isBearishOB = close[ob_lookback] > open[ob_lookback] and close < open and 
+              (open - close) > atr * 1.2
+isBullishOB = close[ob_lookback] < open[ob_lookback] and close > open and 
+              (close - open) > atr * 1.2
+
+if show_ob
+    if isBearishOB
+        box.new(bar_index - ob_lookback, high[ob_lookback],
+                bar_index, low[ob_lookback],
+                bgcolor=col_ob_bear, border_color=color.new(col_ob_bear, 20),
+                border_width=1)
+        label.new(bar_index - ob_lookback, high[ob_lookback], "OB ▼",
+             color=color.new(col_ob_bear, 60), textcolor=col_sell_signal,
+             style=label.style_label_down, size=size.tiny)
+
+    if isBullishOB
+        box.new(bar_index - ob_lookback, high[ob_lookback],
+                bar_index, low[ob_lookback],
+                bgcolor=col_ob_bull, border_color=color.new(col_ob_bull, 20),
+                border_width=1)
+        label.new(bar_index - ob_lookback, low[ob_lookback], "OB ▲",
+             color=color.new(col_ob_bull, 60), textcolor=col_buy_signal,
+             style=label.style_label_up, size=size.tiny)
+
+// ============================================================
+// ██████████  SMC — BOS / ChoCh (Break of Structure)
+// ============================================================
+
+swingHigh = ta.pivothigh(high, swing_len, swing_len)
+swingLow  = ta.pivotlow(low,   swing_len, swing_len)
+
+var float last_swing_high = na
+var float last_swing_low  = na
+var int   lsh_bar = na
+var int   lsl_bar = na
+
+if not na(swingHigh)
+    last_swing_high := swingHigh
+    lsh_bar         := bar_index - swing_len
+
+if not na(swingLow)
+    last_swing_low := swingLow
+    lsl_bar        := bar_index - swing_len
+
+// BOS Bullish: close above last swing high
+bos_bull = show_bos and not na(last_swing_high) and 
+           close > last_swing_high and close[1] <= last_swing_high
+
+// BOS Bearish: close below last swing low
+bos_bear = show_bos and not na(last_swing_low) and 
+           close < last_swing_low and close[1] >= last_swing_low
+
+if bos_bull
+    line.new(lsh_bar, last_swing_high, bar_index, last_swing_high,
+         color=col_bos, style=line.style_solid, width=1)
+    label.new(bar_index, last_swing_high, "BOS ▲",
+         color=color.new(col_buy_signal, 70), textcolor=col_buy_signal,
+         style=label.style_label_left, size=size.tiny)
+
+if bos_bear
+    line.new(lsl_bar, last_swing_low, bar_index, last_swing_low,
+         color=col_bos, style=line.style_solid, width=1)
+    label.new(bar_index, last_swing_low, "BOS ▼",
+         color=color.new(col_sell_signal, 70), textcolor=col_sell_signal,
+         style=label.style_label_left, size=size.tiny)
+
+// ============================================================
+// ██████████  LIT — Inducement Detection
+// ============================================================
+
+// Inducement: small counter-trend move after BOS, before main continuation
+// Simplified: inside bar or small pullback after a big move
+
+isBullInducement = show_inducement and 
+                   close[2] > open[2] and       // bullish move 2 bars ago
+                   high[1] < high[2] and         // retraced (lower high)
+                   low[1] > low[2] and           // didn't break low (inside)
+                   close > open                  // current bullish confirmation
+
+isBearInducement = show_inducement and 
+                   close[2] < open[2] and        // bearish move 2 bars ago
+                   low[1] > low[2] and           // retraced (higher low)
+                   high[1] < high[2] and         // didn't break high (inside)
+                   close < open                  // current bearish confirmation
+
+if isBullInducement
+    label.new(bar_index - 1, low[1], "IND",
+         color=color.new(col_inducement, 60), textcolor=col_inducement,
+         style=label.style_label_up, size=size.tiny)
+
+if isBearInducement
+    label.new(bar_index - 1, high[1], "IND",
+         color=color.new(col_inducement, 60), textcolor=col_inducement,
+         style=label.style_label_down, size=size.tiny)
+
+// ============================================================
+// ██████████  LIT — Liquidity Sweep Detection
+// ============================================================
+
+// Sweep: wick beyond swing high/low but close back inside
+sweepBull = show_sweep and 
+            not na(last_swing_low) and
+            low < last_swing_low and    // wick broke below
+            close > last_swing_low      // closed back above (sweep of lows)
+
+sweepBear = show_sweep and 
+            not na(last_swing_high) and
+            high > last_swing_high and  // wick broke above
+            close < last_swing_high     // closed back below (sweep of highs)
+
+if sweepBull
+    label.new(bar_index, low, "LS ▲",
+         color=color.new(col_buy_signal, 60), textcolor=col_buy_signal,
+         style=label.style_label_up, size=size.small)
+
+if sweepBear
+    label.new(bar_index, high, "LS ▼",
+         color=color.new(col_sell_signal, 60), textcolor=col_sell_signal,
+         style=label.style_label_down, size=size.small)
+
+// ============================================================
+// ██████████  SMT DIVERGENCE
+// ============================================================
+
+smt_close = request.security(smt_symbol, timeframe.period, close, lookahead=barmerge.lookahead_off)
+smt_low   = request.security(smt_symbol, timeframe.period, low,   lookahead=barmerge.lookahead_off)
+smt_high  = request.security(smt_symbol, timeframe.period, high,  lookahead=barmerge.lookahead_off)
+
+// SMT Bullish: Main makes LL but SMT pair does NOT → divergence → bullish
+smt_bull = show_smt and 
+           low < low[1] and smt_low > smt_low[1]  // main lower, smt higher
+
+// SMT Bearish: Main makes HH but SMT pair does NOT → divergence → bearish
+smt_bear = show_smt and 
+           high > high[1] and smt_high < smt_high[1]  // main higher, smt lower
+
+if smt_bull
+    label.new(bar_index, low - atr * 0.5, "SMT ▲",
+         color=color.new(col_smt, 50), textcolor=col_smt,
+         style=label.style_label_up, size=size.small)
+
+if smt_bear
+    label.new(bar_index, high + atr * 0.5, "SMT ▼",
+         color=color.new(col_smt, 50), textcolor=col_smt,
+         style=label.style_label_down, size=size.small)
+
+// ============================================================
+// ██████████  ENTRY SIGNAL LOGIC (ISC Composite)
+// ============================================================
+// 
+// BUY Signal conditions (ALL must align):
+//   1. In London or NY session (Kill Zone)
+//   2. Liquidity Sweep of lows (sweepBull)
+//   3. BOS to upside (bos_bull) OR Bullish OB (isBullishOB)
+//   4. Bullish Inducement cleared (isBullInducement)
+//   5. Optional: SMT Bullish divergence bonus
+//
+// SELL Signal conditions (ALL must align):
+//   1. In London or NY session (Kill Zone)
+//   2. Liquidity Sweep of highs (sweepBear)
+//   3. BOS to downside (bos_bear) OR Bearish OB (isBearishOB)
+//   4. Bearish Inducement cleared (isBearInducement)
+//   5. Optional: SMT Bearish divergence bonus
+
+in_kill_zone = in_london or in_ny
+
+// Core signals
+buy_core  = in_kill_zone and sweepBull and (bos_bull or isBullishOB) and isBullInducement
+sell_core = in_kill_zone and sweepBear and (bos_bear or isBearishOB) and isBearInducement
+
+// With SMT boost
+buy_signal  = buy_core
+sell_signal = sell_core
+
+// ============================================================
+// ██████████  ENTRY / SL / TP — LOCKED ON FIRST SIGNAL BAR
+// ============================================================
+//
+// KEY: Using var so values are SET ONCE and never change
+// SL  = low of signal bar - SL ATR buffer  (buy)
+//     = high of signal bar + SL ATR buffer (sell)
+// TP  = entry + (entry - SL) * RR          (buy)
+//     = entry - (entry - SL) * RR          (sell) — wait, entry - (SL - entry)*RR
+
+var float entry_price = na
+var float sl_price    = na
+var float tp_price    = na
+var int   entry_bar   = na
+var bool  in_trade    = false
+var bool  is_buy      = false
+
+// Only open new trade when NOT already in trade
+if buy_signal and not in_trade
+    in_trade    := true
+    is_buy      := true
+    entry_price := close
+    sl_price    := low - atr * sl_atr_mult
+    tp_price    := close + (close - sl_price) * tp_rr
+    entry_bar   := bar_index
+
+if sell_signal and not in_trade
+    in_trade    := true
+    is_buy      := false
+    entry_price := close
+    sl_price    := high + atr * sl_atr_mult
+    tp_price    := close - (sl_price - close) * tp_rr
+    entry_bar   := bar_index
+
+// Close trade if TP or SL hit
+if in_trade
+    if is_buy
+        if low <= sl_price or high >= tp_price
+            in_trade := false
+    else
+        if high >= sl_price or low <= tp_price
+            in_trade := false
+
+// ============================================================
+// ██████████  DRAW ENTRY SIGNAL — Labels & Lines
+// ============================================================
+
+// Signal arrows on signal bar only (not every bar)
+if buy_signal and not in_trade[1]
+    label.new(bar_index, low - atr * 1.2,
+         "▲ BUY\n" + str.tostring(close, format.mintick),
+         color=color.new(col_buy_signal, 15),
+         textcolor=color.white,
+         style=label.style_label_up,
+         size=size.normal)
+
+if sell_signal and not in_trade[1]
+    label.new(bar_index, high + atr * 1.2,
+         "▼ SELL\n" + str.tostring(close, format.mintick),
+         color=color.new(col_sell_signal, 15),
+         textcolor=color.white,
+         style=label.style_label_down,
+         size=size.normal)
+
+// ============================================================
+// ██████████  ENTRY / SL / TP LINES — Drawn ONCE, Stay Fixed
+// ============================================================
+
+var line entry_line = na
+var line sl_line    = na
+var line tp_line    = na
+var label entry_lbl = na
+var label sl_lbl    = na
+var label tp_lbl    = na
+var box   trade_box = na
+
+// Draw on entry bar
+if (buy_signal or sell_signal) and not in_trade[1]
+    // Delete old objects if any
+    line.delete(entry_line)
+    line.delete(sl_line)
+    line.delete(tp_line)
+    label.delete(entry_lbl)
+    label.delete(sl_lbl)
+    label.delete(tp_lbl)
+    box.delete(trade_box)
+
+    ep = buy_signal ? close : close
+    sl = buy_signal ? low - atr * sl_atr_mult   : high + atr * sl_atr_mult
+    tp = buy_signal ? ep + (ep - sl) * tp_rr    : ep - (sl - ep) * tp_rr
+    cb = bar_index
+
+    // Entry line
+    entry_line := line.new(cb, ep, cb + 80, ep,
+         color=color.new(color.white, 40), style=line.style_solid, width=1)
+
+    // SL line
+    sl_line := line.new(cb, sl, cb + 80, sl,
+         color=col_sl, style=line.style_dashed, width=1)
+
+    // TP line
+    tp_line := line.new(cb, tp, cb + 80, tp,
+         color=col_tp, style=line.style_dashed, width=1)
+
+    // Labels
+    if show_entry_labels
+        entry_lbl := label.new(cb + 82, ep, "ENTRY  " + str.tostring(ep, format.mintick),
+             color=color.new(color.white, 80), textcolor=color.white,
+             style=label.style_label_left, size=size.small)
+
+        sl_lbl := label.new(cb + 82, sl, "SL  " + str.tostring(sl, format.mintick),
+             color=color.new(col_sl, 80), textcolor=col_sl,
+             style=label.style_label_left, size=size.small)
+
+        tp_lbl := label.new(cb + 82, tp, "TP  " + str.tostring(tp, format.mintick) + 
+             "  (" + str.tostring(tp_rr, "#.#") + "R)",
+             color=color.new(col_tp, 80), textcolor=col_tp,
+             style=label.style_label_left, size=size.small)
+
+    // Trade box (entry → TP zone)
+    if show_trade_box
+        box_top    = buy_signal ? tp : ep
+        box_bottom = buy_signal ? ep : tp
+        trade_box := box.new(cb, box_top, cb + 80, box_bottom,
+             bgcolor=buy_signal ? color.new(col_tp, 92) : color.new(col_sl, 92),
+             border_color=na)
+
+// ============================================================
+// ██████████  ALERTS
+// ============================================================
+
+alertcondition(buy_signal,  
+     title="ISC BUY Signal",  
+     message="🟢 ISC 1.0 BUY Signal\nSymbol: {{ticker}}\nTimeframe: {{interval}}\nPrice: {{close}}\nKill Zone Active — Check SL/TP on chart")
+
+alertcondition(sell_signal, 
+     title="ISC SELL Signal", 
+     message="🔴 ISC 1.0 SELL Signal\nSymbol: {{ticker}}\nTimeframe: {{interval}}\nPrice: {{close}}\nKill Zone Active — Check SL/TP on chart")
+
+alertcondition(sweepBull,
+     title="ISC Liquidity Sweep — Lows",
+     message="⚡ Liquidity Sweep of LOWS detected\n{{ticker}} | {{interval}}\nWatch for BUY setup")
+
+alertcondition(sweepBear,
+     title="ISC Liquidity Sweep — Highs",
+     message="⚡ Liquidity Sweep of HIGHS detected\n{{ticker}} | {{interval}}\nWatch for SELL setup")
+
+alertcondition(bos_bull,
+     title="ISC BOS — Bullish Break",
+     message="📈 BOS Bullish (Break of Structure UP)\n{{ticker}} | {{interval}}")
+
+alertcondition(bos_bear,
+     title="ISC BOS — Bearish Break",
+     message="📉 BOS Bearish (Break of Structure DOWN)\n{{ticker}} | {{interval}}")
+
+alertcondition(smt_bull,
+     title="ISC SMT Bullish Divergence",
+     message="🔀 SMT Bullish Divergence!\n{{ticker}} vs SMT Pair\nPotential BUY direction")
+
+alertcondition(smt_bear,
+     title="ISC SMT Bearish Divergence",
+     message="🔀 SMT Bearish Divergence!\n{{ticker}} vs SMT Pair\nPotential SELL direction")
+
+alertcondition(in_asia,
+     title="ISC Asia Session Started",
+     message="🌏 Asia Kill Zone STARTED — {{ticker}}\nWatch for range formation")
+
+alertcondition(in_london and not in_london[1],
+     title="ISC London Session Started",
+     message="🇬🇧 London Kill Zone STARTED — {{ticker}}\nQ2 Manipulation phase — watch for sweeps!")
+
+alertcondition(in_ny and not in_ny[1],
+     title="ISC New York Session Started",
+     message="🗽 New York Kill Zone STARTED — {{ticker}}\nQ3 Distribution phase — main move expected!")
+
+// ============================================================
+// ██████████  INFO TABLE (Top Right Dashboard)
+// ============================================================
+
+var table dash = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(#1a1a2e, 10),
+     border_color=color.new(color.white, 80),
+     border_width=1,
+     frame_color=color.new(color.white, 60),
+     frame_width=1)
+
+// Header
+table.cell(dash, 0, 0, "ISC 1.0", 
+     text_color=color.new(#FFD93D, 0), text_size=size.small,
+     bgcolor=color.new(#1a1a2e, 0))
+table.cell(dash, 1, 0, "Dashboard", 
+     text_color=color.new(#FFD93D, 0), text_size=size.small,
+     bgcolor=color.new(#1a1a2e, 0))
+
+// Session
+sess_name  = in_asia ? "🌏 ASIA" : in_london ? "🇬🇧 LONDON" : in_ny ? "🗽 NEW YORK" : "💤 OFF"
+sess_color = in_asia ? col_asia_bg : in_london ? col_london_bg : in_ny ? col_ny_bg : color.new(color.gray, 50)
+
+table.cell(dash, 0, 1, "Session", 
+     text_color=color.new(color.white, 20), text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+table.cell(dash, 1, 1, sess_name,
+     text_color=sess_color, text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+
+// QT Phase
+qt_phase = in_asia ? "Q1 · Accumulation" : in_london ? "Q2 · Manipulation" : in_ny ? "Q3 · Distribution" : "Q4 · Continue/Rev"
+table.cell(dash, 0, 2, "QT Phase",
+     text_color=color.new(color.white, 20), text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+table.cell(dash, 1, 2, qt_phase,
+     text_color=color.new(color.white, 10), text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+
+// Kill Zone
+kz_text  = in_kill_zone ? "✅ ACTIVE" : "❌ WAIT"
+kz_color = in_kill_zone ? col_buy_signal : color.new(color.gray, 30)
+table.cell(dash, 0, 3, "Kill Zone",
+     text_color=color.new(color.white, 20), text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+table.cell(dash, 1, 3, kz_text,
+     text_color=kz_color, text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+
+// Asia H/L
+table.cell(dash, 0, 4, "Asia High",
+     text_color=color.new(color.white, 20), text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+table.cell(dash, 1, 4, na(asia_high_val) ? "—" : str.tostring(asia_high_val, format.mintick),
+     text_color=col_london_bg, text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+
+table.cell(dash, 0, 5, "Asia Low",
+     text_color=color.new(color.white, 20), text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+table.cell(dash, 1, 5, na(asia_low_val) ? "—" : str.tostring(asia_low_val, format.mintick),
+     text_color=col_asia_bg, text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+
+// Trade Status
+trade_status = in_trade ? (is_buy ? "🟢 BUY ACTIVE" : "🔴 SELL ACTIVE") : "⬜ NO TRADE"
+trade_color  = in_trade ? (is_buy ? col_buy_signal : col_sell_signal) : color.new(color.gray, 30)
+table.cell(dash, 0, 6, "Trade",
+     text_color=color.new(color.white, 20), text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+table.cell(dash, 1, 6, trade_status,
+     text_color=trade_color, text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+
+// SMT
+smt_status = smt_bull ? "▲ SMT BULL DIV" : smt_bear ? "▼ SMT BEAR DIV" : "— No Divergence"
+smt_col_d  = smt_bull ? col_buy_signal : smt_bear ? col_sell_signal : color.new(color.gray, 30)
+table.cell(dash, 0, 7, "SMT",
+     text_color=color.new(color.white, 20), text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+table.cell(dash, 1, 7, smt_status,
+     text_color=smt_col_d, text_size=size.tiny,
+     bgcolor=color.new(#1a1a2e, 0))
+
+// ============================================================
+// End of ISC 1.0 Strategy
+// ============================================================
