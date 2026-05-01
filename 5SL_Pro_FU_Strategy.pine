@@ -6,7 +6,8 @@ indicator("5SL Pro — FU Strategy", overlay=true, max_labels_count=500, max_lin
 // ═══════════════════════════════════════════
 grp1 = "🎯 Signal Sozlamalari"
 signal_mode = input.string("Live (Qotib qoluvchi)", "Signal Rejimi",
-               options=["Live (Qotib qoluvchi)", "Yopilgan Bar"], group=grp1)
+               options=["Live (Qotib qoluvchi)", "Yopilgan Bar"], group=grp1,
+               tooltip="'Live' — REAL-TIME, signal hozirgi narx bilan tashlanadi. 'Yopilgan Bar' — bar yopilishini kutadi (kechikadi).")
 lookback    = input.int(20, "Likvidlik Lookback", minval=5, maxval=50, group=grp1)
 fu_type     = input.string("Ikkalasi", "FU Turi",
                options=["Strong FU", "ATT FU", "Ikkalasi"], group=grp1)
@@ -41,22 +42,35 @@ C_GRAY   = color.new(#8896A8, 0)
 lbl_sz = lbl_size == "Kichik" ? size.small : lbl_size == "Katta" ? size.large : size.normal
 
 // ═══════════════════════════════════════════
-// 📐 HISOB
+// 🔢 SYMBOL'GA MOSLASHGAN FORMATLASH
+// JPY juftliklarida 3 raqam, boshqalarda 5 raqam
 // ═══════════════════════════════════════════
-spread_val = user_spread * 10 * syminfo.mintick
-sl_val     = sl_pips     * 10 * syminfo.mintick
+price_fmt = syminfo.mintick >= 0.01  ? "#.###" :
+            syminfo.mintick >= 0.0001 ? "#.#####" :
+                                        format.mintick
 
+f_price(x) => str.tostring(x, price_fmt)
+
+// Pip = 10 * mintick (5-digit broker uchun). 4-digit'da pip = mintick.
+// Ko'pchilik MT5/TV broker 5-digit, shuning uchun *10 ishlatamiz.
+pip_size   = syminfo.mintick * 10
+spread_val = user_spread * pip_size
+sl_val     = sl_pips     * pip_size
+
+// ═══════════════════════════════════════════
+// 📐 SHAM ANALIZI
+// ═══════════════════════════════════════════
 hi20 = ta.highest(high, lookback)[1]
 lo20 = ta.lowest(low,   lookback)[1]
 
-bull_wick  = low  - math.min(open, close)
-bear_wick  = high - math.max(open, close)
+bull_wick  = low  - math.min(open, close)  // pastki fitil (manfiy bo'ladi)
+bear_wick  = high - math.max(open, close)  // yuqori fitil
 body_size  = math.abs(close - open)
 avg_body   = ta.sma(body_size, 10)
 
-is_strong_bull = bull_wick > body_size and close > open
+is_strong_bull = math.abs(bull_wick) > body_size and close > open
 is_strong_bear = bear_wick > body_size and close < open
-is_att_bull    = bull_wick > 0 and body_size < avg_body * 0.6
+is_att_bull    = math.abs(bull_wick) > 0 and body_size < avg_body * 0.6
 is_att_bear    = bear_wick > 0 and body_size < avg_body * 0.6
 
 liq_bull = low  < lo20 and close > lo20
@@ -86,12 +100,13 @@ var float sl_sell  = na
 var float tp1_sell = na
 var float tp2_sell = na
 var int   dir      = 0
+var string last_symbol = syminfo.ticker
 
 // ═══════════════════════════════════════════
 // 🚀 BUY
 // ═══════════════════════════════════════════
 if buy_signal and dir == 0
-    e_buy    := (use_wick50 ? low + bull_wick * 0.5 : close) + spread_val
+    e_buy    := (use_wick50 ? low + math.abs(bull_wick) * 0.5 : close) + spread_val
     sl_buy   := low - sl_val
     risk_b    = e_buy - sl_buy
     tp1_buy  := e_buy + risk_b * tp1_mult
@@ -100,10 +115,10 @@ if buy_signal and dir == 0
 
     label.new(bar_index, low,
          text      = "🚀 BUY" +
-                     "\nE:   " + str.tostring(e_buy,   "#.##") +
-                     "\nSL:  " + str.tostring(sl_buy,  "#.##") +
-                     "\nTP1: " + str.tostring(tp1_buy, "#.##") +
-                     "\nTP2: " + str.tostring(tp2_buy, "#.##"),
+                     "\nE:   " + f_price(e_buy) +
+                     "\nSL:  " + f_price(sl_buy) +
+                     "\nTP1: " + f_price(tp1_buy) +
+                     "\nTP2: " + f_price(tp2_buy),
          color     = C_BUY_T,
          textcolor = C_WHITE,
          style     = label.style_label_up,
@@ -124,13 +139,15 @@ if buy_signal and dir == 0
         line.new(bar_index, tp2_buy, bar_index + 60, tp2_buy,
              color = C_GOLD, width = 1, style = line.style_dotted)
 
-    // ✅ TELEGRAM WEBHOOK ALERT (JSON)
+    // ✅ TELEGRAM WEBHOOK ALERT (JSON) — real-time timestamp bilan
     alert('{"signal":"BUY","symbol":"' + syminfo.ticker +
-          '","entry":' + str.tostring(e_buy, "#.##") +
-          ',"sl":'     + str.tostring(sl_buy, "#.##") +
-          ',"tp1":'    + str.tostring(tp1_buy, "#.##") +
-          ',"tp2":'    + str.tostring(tp2_buy, "#.##") +
-          ',"tf":"'    + timeframe.period + '"}',
+          '","entry":"' + f_price(e_buy) +
+          '","sl":"'    + f_price(sl_buy) +
+          '","tp1":"'   + f_price(tp1_buy) +
+          '","tp2":"'   + f_price(tp2_buy) +
+          '","price":"' + f_price(close) +
+          '","tf":"'    + timeframe.period +
+          '","ts":'     + str.tostring(timenow) + '}',
           alert.freq_once_per_bar)
 
 // ═══════════════════════════════════════════
@@ -146,10 +163,10 @@ if sell_signal and dir == 0
 
     label.new(bar_index, high,
          text      = "🔻 SELL" +
-                     "\nE:   " + str.tostring(e_sell,   "#.##") +
-                     "\nSL:  " + str.tostring(sl_sell,  "#.##") +
-                     "\nTP1: " + str.tostring(tp1_sell, "#.##") +
-                     "\nTP2: " + str.tostring(tp2_sell, "#.##"),
+                     "\nE:   " + f_price(e_sell) +
+                     "\nSL:  " + f_price(sl_sell) +
+                     "\nTP1: " + f_price(tp1_sell) +
+                     "\nTP2: " + f_price(tp2_sell),
          color     = C_SELL_T,
          textcolor = C_WHITE,
          style     = label.style_label_down,
@@ -170,42 +187,62 @@ if sell_signal and dir == 0
         line.new(bar_index, tp2_sell, bar_index + 60, tp2_sell,
              color = C_GOLD, width = 1, style = line.style_dotted)
 
-    // ✅ TELEGRAM WEBHOOK ALERT (JSON)
+    // ✅ TELEGRAM WEBHOOK ALERT (JSON) — real-time timestamp bilan
     alert('{"signal":"SELL","symbol":"' + syminfo.ticker +
-          '","entry":' + str.tostring(e_sell, "#.##") +
-          ',"sl":'     + str.tostring(sl_sell, "#.##") +
-          ',"tp1":'    + str.tostring(tp1_sell, "#.##") +
-          ',"tp2":'    + str.tostring(tp2_sell, "#.##") +
-          ',"tf":"'    + timeframe.period + '"}',
+          '","entry":"' + f_price(e_sell) +
+          '","sl":"'    + f_price(sl_sell) +
+          '","tp1":"'   + f_price(tp1_sell) +
+          '","tp2":"'   + f_price(tp2_sell) +
+          '","price":"' + f_price(close) +
+          '","tf":"'    + timeframe.period +
+          '","ts":'     + str.tostring(timenow) + '}',
           alert.freq_once_per_bar)
 
 // ═══════════════════════════════════════════
-// 📊 WR KUZATISH
+// 📊 WR + WIN/LOSS WEBHOOK ALERT
 // ═══════════════════════════════════════════
 var int total = 0
 var int wins  = 0
 
+// BUY natijasi
 if dir == 1
     if high >= tp1_buy
         wins  += 1
         total += 1
         dir   := 0
         e_buy := na
+        alert('{"type":"WIN","symbol":"' + syminfo.ticker +
+              '","price":"' + f_price(close) +
+              '","ts":'     + str.tostring(timenow) + '}',
+              alert.freq_once_per_bar)
     else if low <= sl_buy
         total += 1
         dir   := 0
         e_buy := na
+        alert('{"type":"LOSS","symbol":"' + syminfo.ticker +
+              '","price":"' + f_price(close) +
+              '","ts":'     + str.tostring(timenow) + '}',
+              alert.freq_once_per_bar)
 
+// SELL natijasi
 if dir == -1
     if low <= tp1_sell
-        wins  += 1
-        total += 1
-        dir   := 0
+        wins   += 1
+        total  += 1
+        dir    := 0
         e_sell := na
+        alert('{"type":"WIN","symbol":"' + syminfo.ticker +
+              '","price":"' + f_price(close) +
+              '","ts":'     + str.tostring(timenow) + '}',
+              alert.freq_once_per_bar)
     else if high >= sl_sell
-        total += 1
-        dir   := 0
+        total  += 1
+        dir    := 0
         e_sell := na
+        alert('{"type":"LOSS","symbol":"' + syminfo.ticker +
+              '","price":"' + f_price(close) +
+              '","ts":'     + str.tostring(timenow) + '}',
+              alert.freq_once_per_bar)
 
 wr       = total > 0 ? (wins / total) * 100 : 0.0
 wr_color = wr >= 65 ? color.new(#69FF97, 0) :
