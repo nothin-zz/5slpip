@@ -5,9 +5,9 @@ const app     = express();
 app.use(express.json());
 
 // ─── ENV dan olish ───────────────────────────
-const BOT_TOKEN = process.env.BOT_TOKEN;   // Telegram bot token
-const CHAT_ID   = process.env.CHAT_ID;     // Telegram chat id
-const SECRET    = process.env.WEBHOOK_SECRET || 'mysecret'; // xavfsizlik
+const BOT_TOKEN = "8698600397:AAHzrvVYullbDxhrTvBtfP6MHsWUicFVwp4";   // Telegram bot token
+const CHAT_ID   = "-1003721934768";     // Telegram chat id
+const SECRET    = "5sl" || 'mysecret'; // xavfsizlik
 
 // ─── Telegram xabar yuborish ─────────────────
 async function sendTelegram(text) {
