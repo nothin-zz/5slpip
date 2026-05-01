@@ -1,0 +1,463 @@
+// ============================================================
+// ISC 1.0 — Intraday Strategy v2
+// Based on: MSNR + SMC x LIT + ICT Kill Zone + QT + SMT
+// Fixed: All syntax errors corrected
+// Added: Win Rate + RR Stats Dashboard
+// ============================================================
+
+//@version=5
+indicator("ISC 1.0 — Intraday Strategy", shorttitle="ISC 1.0", overlay=true, max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ============================================================
+// INPUTS
+// ============================================================
+
+grp_msnr = "⚡ MSNR — Key Levels"
+show_resistance = input.bool(true, "Show Resistance", group=grp_msnr)
+show_support    = input.bool(true, "Show Support",    group=grp_msnr)
+show_ocl        = input.bool(true, "Show OCL",        group=grp_msnr)
+show_ob         = input.bool(true, "Show Order Block", group=grp_msnr)
+lookback_snr    = input.int(20, "SNR Lookback", group=grp_msnr, minval=5, maxval=100)
+ob_lookback     = input.int(5,  "OB Lookback",  group=grp_msnr, minval=2, maxval=20)
+
+grp_lit = "🔑 LIT — Liquidity"
+show_inducement = input.bool(true, "Show Inducement", group=grp_lit)
+show_sweep      = input.bool(true, "Show Sweep",      group=grp_lit)
+show_bos        = input.bool(true, "Show BOS/ChoCh",  group=grp_lit)
+swing_len       = input.int(10, "Swing Length", group=grp_lit, minval=3, maxval=50)
+
+grp_ict = "⏰ ICT Kill Zone"
+show_asia    = input.bool(true, "Show Asia",    group=grp_ict)
+show_london  = input.bool(true, "Show London",  group=grp_ict)
+show_ny      = input.bool(true, "Show NY",      group=grp_ict)
+show_asia_hl = input.bool(true, "Show Asia H/L", group=grp_ict)
+asia_start   = input.int(1,  "Asia Start (UTC)",   group=grp_ict, minval=0, maxval=23)
+asia_end     = input.int(5,  "Asia End (UTC)",     group=grp_ict, minval=0, maxval=23)
+lon_start    = input.int(7,  "London Start (UTC)", group=grp_ict, minval=0, maxval=23)
+lon_end      = input.int(10, "London End (UTC)",   group=grp_ict, minval=0, maxval=23)
+ny_start     = input.int(12, "NY Start (UTC)",     group=grp_ict, minval=0, maxval=23)
+ny_end       = input.int(15, "NY End (UTC)",       group=grp_ict, minval=0, maxval=23)
+
+grp_qt = "🔄 QT — Quarterly Theory"
+show_qt_bg = input.bool(true, "Show Session Background", group=grp_qt)
+
+grp_entry = "🎯 Entry Settings"
+atr_len      = input.int(14,    "ATR Length",       group=grp_entry)
+sl_atr_mult  = input.float(1.0, "SL ATR Multiplier", group=grp_entry, minval=0.1, step=0.1)
+tp_rr        = input.float(3.0, "TP Risk:Reward",   group=grp_entry, minval=1.0, step=0.5)
+show_labels  = input.bool(true, "Show Entry Labels", group=grp_entry)
+show_box     = input.bool(true, "Show Trade Box",    group=grp_entry)
+
+grp_smt = "📊 SMT Divergence"
+show_smt   = input.bool(true, "Show SMT Signal", group=grp_smt)
+smt_symbol = input.symbol("XAGUSD", "SMT Pair", group=grp_smt)
+
+grp_col = "🎨 Colors"
+col_res      = input.color(color.new(#FF6B6B, 20), "Resistance",    group=grp_col)
+col_sup      = input.color(color.new(#4ECDC4, 20), "Support",       group=grp_col)
+col_ob_bear  = input.color(color.new(#FF6B6B, 60), "Bearish OB",    group=grp_col)
+col_ob_bull  = input.color(color.new(#4ECDC4, 60), "Bullish OB",    group=grp_col)
+col_asia_bg  = input.color(color.new(#B8B8FF, 88), "Asia BG",       group=grp_col)
+col_lon_bg   = input.color(color.new(#FFD93D, 88), "London BG",     group=grp_col)
+col_ny_bg    = input.color(color.new(#6BCB77, 88), "NY BG",         group=grp_col)
+col_buy      = input.color(color.new(#4ECDC4, 0),  "Buy Color",     group=grp_col)
+col_sell     = input.color(color.new(#FF6B6B, 0),  "Sell Color",    group=grp_col)
+col_sl_c     = input.color(color.new(#FF4757, 0),  "SL Color",      group=grp_col)
+col_tp_c     = input.color(color.new(#2ED573, 0),  "TP Color",      group=grp_col)
+col_ind      = input.color(color.new(#FFA502, 70), "Inducement",    group=grp_col)
+col_smt_c    = input.color(color.new(#A29BFE, 0),  "SMT Color",     group=grp_col)
+
+// ============================================================
+// BASE CALCULATIONS
+// ============================================================
+
+atr = ta.atr(atr_len)
+barHour = hour(time, "UTC")
+
+inSess(s, e) => barHour >= s and barHour < e
+
+in_asia   = inSess(asia_start, asia_end)
+in_london = inSess(lon_start, lon_end)
+in_ny     = inSess(ny_start, ny_end)
+in_kz     = in_london or in_ny
+
+// ============================================================
+// QT SESSION BACKGROUND
+// ============================================================
+
+bgcolor(show_qt_bg and show_asia   and in_asia   ? col_asia_bg : na, title="Asia BG")
+bgcolor(show_qt_bg and show_london and in_london  ? col_lon_bg  : na, title="London BG")
+bgcolor(show_qt_bg and show_ny     and in_ny      ? col_ny_bg   : na, title="NY BG")
+
+// ============================================================
+// ASIA HIGH / LOW
+// ============================================================
+
+var float a_high = na
+var float a_low  = na
+var bool  a_set  = false
+var int   a_bar  = na
+
+newDayAsiaStart = barHour == asia_start and barHour[1] != asia_start
+if newDayAsiaStart
+    a_high := high
+    a_low  := low
+    a_set  := false
+    a_bar  := bar_index
+
+if in_asia
+    if na(a_high) or high > a_high
+        a_high := high
+    if na(a_low) or low < a_low
+        a_low := low
+    a_set := true
+
+var line ah_line = na
+var line al_line = na
+var label ah_lbl = na
+var label al_lbl = na
+
+if show_asia_hl and a_set and not in_asia and not na(a_high)
+    if na(ah_line)
+        ah_line := line.new(a_bar, a_high, bar_index, a_high, color=color.new(#FFD93D, 40), style=line.style_dashed, width=1)
+        ah_lbl  := label.new(bar_index, a_high, "Asia H", color=color.new(#FFD93D, 70), textcolor=#FFD93D, style=label.style_label_left, size=size.tiny)
+    else
+        line.set_x2(ah_line, bar_index)
+        label.set_x(ah_lbl, bar_index)
+
+    if na(al_line)
+        al_line := line.new(a_bar, a_low, bar_index, a_low, color=color.new(#B8B8FF, 40), style=line.style_dashed, width=1)
+        al_lbl  := label.new(bar_index, a_low, "Asia L", color=color.new(#B8B8FF, 70), textcolor=#B8B8FF, style=label.style_label_left, size=size.tiny)
+    else
+        line.set_x2(al_line, bar_index)
+        label.set_x(al_lbl, bar_index)
+
+// ============================================================
+// MSNR — SUPPORT / RESISTANCE BOXES
+// ============================================================
+
+ph = ta.pivothigh(high, lookback_snr, lookback_snr)
+pl = ta.pivotlow(low,   lookback_snr, lookback_snr)
+
+var float r_lvl = na
+var float s_lvl = na
+var int   r_bar = na
+var int   s_bar = na
+
+if not na(ph)
+    r_lvl := ph
+    r_bar := bar_index - lookback_snr
+
+if not na(pl)
+    s_lvl := pl
+    s_bar := bar_index - lookback_snr
+
+if show_resistance and not na(r_lvl)
+    box.new(r_bar, r_lvl + atr * 0.15, bar_index, r_lvl - atr * 0.05, bgcolor=col_res, border_color=color.new(col_res, 40), border_width=1)
+    r_lvl := na
+
+if show_support and not na(s_lvl)
+    box.new(s_bar, s_lvl + atr * 0.05, bar_index, s_lvl - atr * 0.15, bgcolor=col_sup, border_color=color.new(col_sup, 40), border_width=1)
+    s_lvl := na
+
+// ============================================================
+// MSNR — OCL (Open Candle Level)
+// ============================================================
+
+bigBear = close < open and (open - close) > atr * 1.5
+bigBull = close > open and (close - open) > atr * 1.5
+
+if show_ocl and bigBear
+    line.new(bar_index, open, bar_index + 20, open, color=color.new(col_res, 30), style=line.style_dotted, width=1)
+    label.new(bar_index, open, "OCL", color=color.new(col_res, 80), textcolor=col_res, style=label.style_label_right, size=size.tiny)
+
+if show_ocl and bigBull
+    line.new(bar_index, open, bar_index + 20, open, color=color.new(col_sup, 30), style=line.style_dotted, width=1)
+    label.new(bar_index, open, "OCL", color=color.new(col_sup, 80), textcolor=col_sup, style=label.style_label_right, size=size.tiny)
+
+// ============================================================
+// MSNR — ORDER BLOCK
+// ============================================================
+
+isBearOB = close[ob_lookback] > open[ob_lookback] and close < open and (open - close) > atr * 1.2
+isBullOB = close[ob_lookback] < open[ob_lookback] and close > open and (close - open) > atr * 1.2
+
+if show_ob and isBearOB
+    box.new(bar_index - ob_lookback, high[ob_lookback], bar_index, low[ob_lookback], bgcolor=col_ob_bear, border_color=color.new(col_ob_bear, 20), border_width=1)
+    label.new(bar_index - ob_lookback, high[ob_lookback], "OB▼", color=color.new(col_ob_bear, 60), textcolor=col_sell, style=label.style_label_down, size=size.tiny)
+
+if show_ob and isBullOB
+    box.new(bar_index - ob_lookback, high[ob_lookback], bar_index, low[ob_lookback], bgcolor=col_ob_bull, border_color=color.new(col_ob_bull, 20), border_width=1)
+    label.new(bar_index - ob_lookback, low[ob_lookback], "OB▲", color=color.new(col_ob_bull, 60), textcolor=col_buy, style=label.style_label_up, size=size.tiny)
+
+// ============================================================
+// SMC — BOS / ChoCh
+// ============================================================
+
+swH = ta.pivothigh(high, swing_len, swing_len)
+swL = ta.pivotlow(low,   swing_len, swing_len)
+
+var float lsh = na
+var float lsl = na
+var int   lsh_b = na
+var int   lsl_b = na
+
+if not na(swH)
+    lsh   := swH
+    lsh_b := bar_index - swing_len
+
+if not na(swL)
+    lsl   := swL
+    lsl_b := bar_index - swing_len
+
+bos_up = show_bos and not na(lsh) and close > lsh and close[1] <= lsh
+bos_dn = show_bos and not na(lsl) and close < lsl and close[1] >= lsl
+
+bos_col = color.new(color.white, 30)
+
+if bos_up
+    line.new(lsh_b, lsh, bar_index, lsh, color=bos_col, style=line.style_solid, width=1)
+    label.new(bar_index, lsh, "BOS▲", color=color.new(col_buy, 70), textcolor=col_buy, style=label.style_label_left, size=size.tiny)
+
+if bos_dn
+    line.new(lsl_b, lsl, bar_index, lsl, color=bos_col, style=line.style_solid, width=1)
+    label.new(bar_index, lsl, "BOS▼", color=color.new(col_sell, 70), textcolor=col_sell, style=label.style_label_left, size=size.tiny)
+
+// ============================================================
+// LIT — INDUCEMENT
+// ============================================================
+
+indBull = show_inducement and close[2] > open[2] and high[1] < high[2] and low[1] > low[2] and close > open
+indBear = show_inducement and close[2] < open[2] and low[1] > low[2]   and high[1] < high[2] and close < open
+
+if indBull
+    label.new(bar_index - 1, low[1], "IND", color=color.new(col_ind, 60), textcolor=col_ind, style=label.style_label_up, size=size.tiny)
+
+if indBear
+    label.new(bar_index - 1, high[1], "IND", color=color.new(col_ind, 60), textcolor=col_ind, style=label.style_label_down, size=size.tiny)
+
+// ============================================================
+// LIT — LIQUIDITY SWEEP
+// ============================================================
+
+swpBull = show_sweep and not na(lsl) and low < lsl and close > lsl
+swpBear = show_sweep and not na(lsh) and high > lsh and close < lsh
+
+if swpBull
+    label.new(bar_index, low, "LS▲", color=color.new(col_buy, 60), textcolor=col_buy, style=label.style_label_up, size=size.small)
+
+if swpBear
+    label.new(bar_index, high, "LS▼", color=color.new(col_sell, 60), textcolor=col_sell, style=label.style_label_down, size=size.small)
+
+// ============================================================
+// SMT DIVERGENCE
+// ============================================================
+
+smt_low  = request.security(smt_symbol, timeframe.period, low,  lookahead=barmerge.lookahead_off)
+smt_high = request.security(smt_symbol, timeframe.period, high, lookahead=barmerge.lookahead_off)
+
+smt_bull = show_smt and low  < low[1]  and smt_low  > smt_low[1]
+smt_bear = show_smt and high > high[1] and smt_high < smt_high[1]
+
+if smt_bull
+    label.new(bar_index, low - atr * 0.5, "SMT▲", color=color.new(col_smt_c, 50), textcolor=col_smt_c, style=label.style_label_up, size=size.small)
+
+if smt_bear
+    label.new(bar_index, high + atr * 0.5, "SMT▼", color=color.new(col_smt_c, 50), textcolor=col_smt_c, style=label.style_label_down, size=size.small)
+
+// ============================================================
+// ENTRY SIGNAL LOGIC
+// ============================================================
+
+buy_sig  = in_kz and swpBull and (bos_up or isBullOB) and indBull
+sell_sig = in_kz and swpBear and (bos_dn or isBearOB) and indBear
+
+// ============================================================
+// TRADE MANAGEMENT — LOCKED SL/TP
+// ============================================================
+
+var float ep     = na  // entry price
+var float sl_p   = na  // stop loss
+var float tp_p   = na  // take profit
+var int   e_bar  = na  // entry bar
+var bool  in_trd = false
+var bool  is_buy = false
+
+// Stats counters
+var int total_trades = 0
+var int win_trades   = 0
+var int loss_trades  = 0
+var float total_rr_won  = 0.0
+var float total_rr_lost = 0.0
+
+// Open new trade
+if buy_sig and not in_trd
+    in_trd := true
+    is_buy := true
+    ep     := close
+    sl_p   := low - atr * sl_atr_mult
+    tp_p   := close + (close - sl_p) * tp_rr
+    e_bar  := bar_index
+    total_trades += 1
+
+if sell_sig and not in_trd
+    in_trd := true
+    is_buy := false
+    ep     := close
+    sl_p   := high + atr * sl_atr_mult
+    tp_p   := close - (sl_p - close) * tp_rr
+    e_bar  := bar_index
+    total_trades += 1
+
+// Check close conditions
+if in_trd
+    risk = math.abs(ep - sl_p)
+    if is_buy
+        if low <= sl_p
+            in_trd       := false
+            loss_trades  += 1
+            total_rr_lost += 1.0
+        else if high >= tp_p
+            in_trd       := false
+            win_trades   += 1
+            total_rr_won += tp_rr
+    else
+        if high >= sl_p
+            in_trd       := false
+            loss_trades  += 1
+            total_rr_lost += 1.0
+        else if low <= tp_p
+            in_trd       := false
+            win_trades   += 1
+            total_rr_won += tp_rr
+
+// ============================================================
+// DRAW ENTRY LABELS ON SIGNAL BAR
+// ============================================================
+
+if buy_sig and not in_trd[1]
+    label.new(bar_index, low - atr * 1.3, "▲ BUY\n" + str.tostring(close, format.mintick), color=color.new(col_buy, 15), textcolor=color.white, style=label.style_label_up, size=size.normal)
+
+if sell_sig and not in_trd[1]
+    label.new(bar_index, high + atr * 1.3, "▼ SELL\n" + str.tostring(close, format.mintick), color=color.new(col_sell, 15), textcolor=color.white, style=label.style_label_down, size=size.normal)
+
+// ============================================================
+// DRAW ENTRY / SL / TP LINES (FIXED — drawn once)
+// ============================================================
+
+var line e_line  = na
+var line sl_line = na
+var line tp_line = na
+var label e_lbl  = na
+var label sl_lbl = na
+var label tp_lbl = na
+var box   t_box  = na
+
+if (buy_sig or sell_sig) and not in_trd[1]
+    line.delete(e_line)
+    line.delete(sl_line)
+    line.delete(tp_line)
+    label.delete(e_lbl)
+    label.delete(sl_lbl)
+    label.delete(tp_lbl)
+    box.delete(t_box)
+
+    new_ep  = close
+    new_sl  = buy_sig ? low  - atr * sl_atr_mult       : high + atr * sl_atr_mult
+    new_tp  = buy_sig ? new_ep + (new_ep - new_sl) * tp_rr : new_ep - (new_sl - new_ep) * tp_rr
+    cb      = bar_index
+    ext     = cb + 80
+
+    e_line  := line.new(cb, new_ep, ext, new_ep, color=color.new(color.white, 40), style=line.style_solid,  width=1)
+    sl_line := line.new(cb, new_sl, ext, new_sl, color=col_sl_c,                   style=line.style_dashed, width=1)
+    tp_line := line.new(cb, new_tp, ext, new_tp, color=col_tp_c,                   style=line.style_dashed, width=1)
+
+    if show_labels
+        e_lbl  := label.new(ext + 2, new_ep, "ENTRY  " + str.tostring(new_ep, format.mintick), color=color.new(color.white, 80), textcolor=color.white, style=label.style_label_left, size=size.small)
+        sl_lbl := label.new(ext + 2, new_sl, "SL  "    + str.tostring(new_sl, format.mintick), color=color.new(col_sl_c, 80),    textcolor=col_sl_c,    style=label.style_label_left, size=size.small)
+        tp_lbl := label.new(ext + 2, new_tp, "TP  "     + str.tostring(new_tp, format.mintick) + "   (" + str.tostring(tp_rr, "#.#") + "R)", color=color.new(col_tp_c, 80), textcolor=col_tp_c, style=label.style_label_left, size=size.small)
+
+    if show_box
+        bx_top = buy_sig ? new_tp : new_ep
+        bx_bot = buy_sig ? new_ep : new_tp
+        t_box  := box.new(cb, bx_top, ext, bx_bot, bgcolor=buy_sig ? color.new(col_tp_c, 92) : color.new(col_sl_c, 92), border_color=na)
+
+// ============================================================
+// ALERTS
+// ============================================================
+
+alertcondition(buy_sig,  title="ISC BUY",  message="🟢 ISC 1.0 BUY | {{ticker}} | {{interval}} | Price: {{close}}")
+alertcondition(sell_sig, title="ISC SELL", message="🔴 ISC 1.0 SELL | {{ticker}} | {{interval}} | Price: {{close}}")
+alertcondition(swpBull,  title="ISC Sweep Lows",  message="⚡ Liquidity Sweep LOWS | {{ticker}}")
+alertcondition(swpBear,  title="ISC Sweep Highs", message="⚡ Liquidity Sweep HIGHS | {{ticker}}")
+alertcondition(bos_up,   title="ISC BOS Up",   message="📈 BOS Bullish | {{ticker}}")
+alertcondition(bos_dn,   title="ISC BOS Down", message="📉 BOS Bearish | {{ticker}}")
+alertcondition(smt_bull, title="ISC SMT Bull", message="🔀 SMT Bullish Divergence | {{ticker}}")
+alertcondition(smt_bear, title="ISC SMT Bear", message="🔀 SMT Bearish Divergence | {{ticker}}")
+
+// ============================================================
+// DASHBOARD — Top Right
+// ============================================================
+
+// Win rate calculation
+wr_pct   = total_trades > 0 ? (win_trades / total_trades) * 100 : 0.0
+avg_win  = win_trades  > 0  ? total_rr_won  / win_trades  : 0.0
+avg_loss = loss_trades > 0  ? total_rr_lost / loss_trades : 0.0
+net_rr   = total_rr_won - total_rr_lost
+
+// Colors
+wr_col  = wr_pct >= 55 ? #2ED573 : wr_pct >= 40 ? #FFD93D : #FF4757
+net_col = net_rr >= 0  ? #2ED573 : #FF4757
+
+// Session info
+sess_name  = in_asia ? "🌏 ASIA" : in_london ? "🏦 LONDON" : in_ny ? "🗽 NEW YORK" : "💤 OFF-HOURS"
+sess_col   = in_asia ? #B8B8FF   : in_london ? #FFD93D      : in_ny ? #6BCB77       : color.gray
+qt_phase   = in_asia ? "Q1 · Accumulation" : in_london ? "Q2 · Manipulation" : in_ny ? "Q3 · Distribution" : "Q4 · Continue/Rev"
+
+trade_txt  = in_trd ? (is_buy ? "🟢 BUY ACTIVE" : "🔴 SELL ACTIVE") : "⬜ NO TRADE"
+trade_col  = in_trd ? (is_buy ? #4ECDC4 : #FF6B6B) : color.gray
+kz_txt     = in_kz  ? "✅ ACTIVE" : "❌ WAITING"
+kz_col     = in_kz  ? #2ED573 : color.gray
+smt_txt    = smt_bull ? "▲ BULL DIV" : smt_bear ? "▼ BEAR DIV" : "— None"
+smt_col2   = smt_bull ? #4ECDC4 : smt_bear ? #FF6B6B : color.gray
+
+// Table: 2 cols x 18 rows
+var table dash = table.new(position.top_right, 2, 18, bgcolor=color.new(#0d0d1a, 5), border_color=color.new(color.white, 75), border_width=1, frame_color=color.new(#A29BFE, 50), frame_width=1)
+
+// Helper: draw row
+dashRow(r, lbl, val, vc) =>
+    table.cell(dash, 0, r, lbl, text_color=color.new(color.white, 30), text_size=size.tiny, bgcolor=color.new(#0d0d1a, 0))
+    table.cell(dash, 1, r, val, text_color=vc,                          text_size=size.tiny, bgcolor=color.new(#0d0d1a, 0))
+
+// Header
+table.cell(dash, 0, 0, "  ISC 1.0", text_color=#A29BFE, text_size=size.small, bgcolor=color.new(#1a0a2e, 0))
+table.cell(dash, 1, 0, "Strategy ✦", text_color=#FFD93D, text_size=size.small, bgcolor=color.new(#1a0a2e, 0))
+
+// Separator row 1
+table.cell(dash, 0, 1, "─ MARKET ─────", text_color=color.new(color.white, 60), text_size=size.tiny, bgcolor=color.new(#0d0d1a, 0))
+table.cell(dash, 1, 1, "", text_color=color.white, text_size=size.tiny, bgcolor=color.new(#0d0d1a, 0))
+
+dashRow(2,  "Session",   sess_name, sess_col)
+dashRow(3,  "QT Phase",  qt_phase,  color.new(color.white, 10))
+dashRow(4,  "Kill Zone", kz_txt,    kz_col)
+dashRow(5,  "Asia High", na(a_high) ? "—" : str.tostring(a_high, format.mintick), #FFD93D)
+dashRow(6,  "Asia Low",  na(a_low)  ? "—" : str.tostring(a_low,  format.mintick), #B8B8FF)
+dashRow(7,  "SMT Div",   smt_txt,   smt_col2)
+
+// Separator row 2
+table.cell(dash, 0, 8, "─ TRADE ──────", text_color=color.new(color.white, 60), text_size=size.tiny, bgcolor=color.new(#0d0d1a, 0))
+table.cell(dash, 1, 8, "", text_color=color.white, text_size=size.tiny, bgcolor=color.new(#0d0d1a, 0))
+
+dashRow(9,  "Status",    trade_txt, trade_col)
+dashRow(10, "Entry",     in_trd and not na(ep)   ? str.tostring(ep,   format.mintick) : "—", color.white)
+dashRow(11, "SL",        in_trd and not na(sl_p) ? str.tostring(sl_p, format.mintick) : "—", col_sl_c)
+dashRow(12, "TP",        in_trd and not na(tp_p) ? str.tostring(tp_p, format.mintick) + " (" + str.tostring(tp_rr,"#.#") + "R)" : "—", col_tp_c)
+
+// Separator row 3
+table.cell(dash, 0, 13, "─ STATS ──────", text_color=color.new(color.white, 60), text_size=size.tiny, bgcolor=color.new(#0d0d1a, 0))
+table.cell(dash, 1, 13, "", text_color=color.white, text_size=size.tiny, bgcolor=color.new(#0d0d1a, 0))
+
+dashRow(14, "Trades",    str.tostring(total_trades) + " total", color.white)
+dashRow(15, "Win Rate",  str.tostring(math.round(wr_pct, 1)) + "%  (" + str.tostring(win_trades) + "W / " + str.tostring(loss_trades) + "L)", wr_col)
+dashRow(16, "Avg Win",   "+" + str.tostring(math.round(avg_win,  1)) + "R", #2ED573)
+dashRow(17, "Net P/L",   (net_rr >= 0 ? "+" : "") + str.tostring(math.round(net_rr, 1)) + "R total", net_col)
