@@ -1,0 +1,720 @@
+// ============================================================================
+// ISC 1.0 — Intelligent Smart Money Confluence Indicator
+// Pine Script v5 | Author: ISC Strategy Engine
+// Version: 1.0.0
+//
+// Strategy: SMC × LIT (Liquidity Inducement Theorem)
+// Features:
+//   • Non-repainting Orderblocks (OB) with FVG confluence
+//   • LIT Entry Sequence: Inducement → Sweep → BO → POI
+//   • Asia Range Kill Zone (ICT)
+//   • Quarterly Theory (QT) Micro-Cycles
+//   • SMT Divergence confirmation
+//   • Automated TP/SL projection boxes (future-projected)
+//   • Predictive "ghost" preview on live candle
+//   • Webhook/bot-ready structured alerts
+//   • Minimalist aesthetic: no borders, soft premium palette
+// ============================================================================
+
+//@version=5
+indicator(title="ISC 1.0 — SMC × LIT Engine", shorttitle="ISC 1.0",
+     overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=200)
+
+// ============================================================================
+// ─── USER INPUTS ─────────────────────────────────────────────────────────────
+// ============================================================================
+
+// --- SMT Correlation Asset ---
+grp_smt = "SMT Divergence"
+i_smt_enabled   = input.bool(true,  "Enable SMT Divergence",              group=grp_smt)
+i_smt_symbol    = input.symbol("XAGUSD", "Correlated Asset (e.g. XAGUSD)",group=grp_smt)
+i_smt_lookback  = input.int(5,  "SMT Lookback Bars",  minval=2, maxval=20, group=grp_smt)
+
+// --- Asia Kill Zone ---
+grp_asia = "Asia Kill Zone"
+i_asia_enabled  = input.bool(true, "Enable Asia Range",                    group=grp_asia)
+i_asia_start    = input.int(1,  "Asia Start Hour (UTC+1)",  minval=0, maxval=23, group=grp_asia)
+i_asia_end      = input.int(5,  "Asia End Hour (UTC+1)",    minval=0, maxval=23, group=grp_asia)
+i_fib_enabled   = input.bool(true, "Draw Fibonacci (0.33–0.50) on Asia Range", group=grp_asia)
+
+// --- Quarterly Theory ---
+grp_qt = "Quarterly Theory (QT)"
+i_qt_enabled    = input.bool(true, "Enable QT Micro-Cycle Lines",          group=grp_qt)
+i_qt_base_hour  = input.int(0,  "QT Base Hour (UTC+1)",   minval=0, maxval=23, group=grp_qt)
+
+// --- Orderblock Settings ---
+grp_ob = "Orderblocks"
+i_ob_extend     = input.int(20, "OB Future Extension (bars)",  minval=5, maxval=100, group=grp_ob)
+i_ob_lookback   = input.int(10, "OB Engulf Lookback",          minval=3, maxval=50,  group=grp_ob)
+
+// --- TP/SL Projection ---
+grp_tp = "TP / SL Projection"
+i_tp_extend     = input.int(15, "TP/SL Box Future Extension (bars)", minval=5, maxval=60, group=grp_tp)
+i_sl_mult       = input.float(1.5, "SL ATR Multiplier",  minval=0.5, maxval=5.0,    group=grp_tp)
+i_tp_mult       = input.float(3.0, "TP ATR Multiplier",  minval=1.0, maxval=10.0,   group=grp_tp)
+
+// --- Predictive Preview ---
+grp_prev = "Predictive Preview"
+i_preview_enabled = input.bool(true, "Enable Ghost Preview on Live Candle", group=grp_prev)
+
+// ============================================================================
+// ─── CONSTANTS & COLORS (Minimalist Palette) ─────────────────────────────────
+// ============================================================================
+
+// Orderblocks
+C_OB_BULL       = color.new(#00ffbb, 88)   // Soft Mint/Aqua
+C_OB_BULL_FVG   = color.new(#00ffdd, 78)   // Brighter when FVG confluence
+C_OB_BEAR       = color.new(#ff3366, 88)   // Soft Rose/Crimson
+C_OB_BEAR_FVG   = color.new(#ff1155, 78)   // Brighter when FVG confluence
+C_OB_GHOST_BULL = color.new(#00ffbb, 95)   // Ghost/preview
+C_OB_GHOST_BEAR = color.new(#ff3366, 95)   // Ghost/preview
+C_NO_BORDER     = color.new(color.white, 100) // Invisible border
+
+// Asia Range
+C_ASIA_BG       = color.new(color.gray, 92)
+C_ASIA_LINE     = color.new(color.silver, 60)
+C_FIB           = color.new(color.yellow, 80)
+
+// QT Lines
+C_QT_LINE       = color.new(color.white, 75)
+
+// TP/SL
+C_TP_BOX        = color.new(#00e676, 82)   // Soft green
+C_SL_BOX        = color.new(#ff1744, 82)   // Soft red
+
+// SMT Label
+C_SMT_BULL      = color.new(#00ffbb, 30)
+C_SMT_BEAR      = color.new(#ff3366, 30)
+
+// ============================================================================
+// ─── TIMEZONE HELPERS ────────────────────────────────────────────────────────
+// ============================================================================
+// We use "UTC+1" (London Standard) for all kill zone calculations.
+TZ = "UTC+1"
+
+hourInTZ() =>
+    hour(time, TZ)
+
+minuteInTZ() =>
+    minute(time, TZ)
+
+// Returns true if current bar falls within [startHour, endHour) in UTC+1
+inHourRange(startH, endH) =>
+    h = hourInTZ()
+    h >= startH and h < endH
+
+// ============================================================================
+// ─── ATR (for SL/TP sizing) ──────────────────────────────────────────────────
+// ============================================================================
+atr14 = ta.atr(14)
+
+// ============================================================================
+// ─── SECTION 1: ASIA RANGE (ICT Kill Zone) ───────────────────────────────────
+// ============================================================================
+// We track each new Asia session and draw:
+//   • A background box for the Asia range
+//   • Extended horizontal lines for Asia High / Asia Low
+//   • Optional Fibonacci (0.33, 0.50) between Asia Low and High
+
+// Storage arrays for Asia boxes and lines
+var box[]   asia_boxes  = array.new_box()
+var line[]  asia_lines  = array.new_line()
+var label[] asia_labels = array.new_label()
+
+// Track Asia session state
+var float asia_high     = na
+var float asia_low      = na
+var int   asia_start_bar = na
+var bool  asia_active   = false
+var bool  asia_drawn    = false
+
+// Only draw/update on confirmed bars
+if barstate.isconfirmed and i_asia_enabled
+    inAsia = inHourRange(i_asia_start, i_asia_end)
+
+    // Session just started
+    if inAsia and not asia_active
+        asia_active    := true
+        asia_drawn     := false
+        asia_high      := high
+        asia_low       := low
+        asia_start_bar := bar_index
+
+    // Session ongoing – track H/L
+    if inAsia and asia_active
+        asia_high := math.max(asia_high, high)
+        asia_low  := math.min(asia_low,  low)
+
+    // Session just ended – draw everything
+    if not inAsia and asia_active and not asia_drawn
+        asia_active := false
+        asia_drawn  := true
+
+        _endBar = bar_index
+        _extend = bar_index + 50   // Asia lines extend 50 bars into future
+
+        // Background box
+        _bgBox = box.new(
+             left          = asia_start_bar,
+             top           = asia_high,
+             right         = _endBar,
+             bottom        = asia_low,
+             bgcolor       = C_ASIA_BG,
+             border_color  = C_NO_BORDER)
+        array.push(asia_boxes, _bgBox)
+
+        // Asia High line
+        _ahLine = line.new(
+             x1    = asia_start_bar,
+             y1    = asia_high,
+             x2    = _extend,
+             y2    = asia_high,
+             color = C_ASIA_LINE,
+             width = 1,
+             style = line.style_dashed)
+        array.push(asia_lines, _ahLine)
+
+        // Asia Low line
+        _alLine = line.new(
+             x1    = asia_start_bar,
+             y1    = asia_low,
+             x2    = _extend,
+             y2    = asia_low,
+             color = C_ASIA_LINE,
+             width = 1,
+             style = line.style_dashed)
+        array.push(asia_lines, _alLine)
+
+        // Labels
+        _lbH = label.new(
+             x     = asia_start_bar,
+             y     = asia_high,
+             text  = "Asia H",
+             style = label.style_none,
+             color = color.new(color.white,100),
+             textcolor = C_ASIA_LINE,
+             size  = size.tiny)
+        array.push(asia_labels, _lbH)
+
+        _lbL = label.new(
+             x     = asia_start_bar,
+             y     = asia_low,
+             text  = "Asia L",
+             style = label.style_none,
+             color = color.new(color.white,100),
+             textcolor = C_ASIA_LINE,
+             size  = size.tiny)
+        array.push(asia_labels, _lbL)
+
+        // ── Fibonacci 0.33 and 0.50 ──────────────────────────────────────
+        if i_fib_enabled
+            _range  = asia_high - asia_low
+            _f033   = asia_low + _range * 0.33
+            _f050   = asia_low + _range * 0.50
+
+            _fib33 = line.new(
+                 x1    = asia_start_bar,
+                 y1    = _f033,
+                 x2    = _extend,
+                 y2    = _f033,
+                 color = C_FIB,
+                 width = 1,
+                 style = line.style_dotted)
+            array.push(asia_lines, _fib33)
+
+            _fib50 = line.new(
+                 x1    = asia_start_bar,
+                 y1    = _f050,
+                 x2    = _extend,
+                 y2    = _f050,
+                 color = C_FIB,
+                 width = 1,
+                 style = line.style_dotted)
+            array.push(asia_lines, _fib50)
+
+        // Prune old Asia objects (keep last 5 sessions)
+        while array.size(asia_boxes) > 5
+            box.delete(array.shift(asia_boxes))
+        while array.size(asia_lines) > 30
+            line.delete(array.shift(asia_lines))
+        while array.size(asia_labels) > 20
+            label.delete(array.shift(asia_labels))
+
+// ============================================================================
+// ─── SECTION 2: QUARTERLY THEORY (QT) MICRO-CYCLE LINES ─────────────────────
+// ============================================================================
+// Each 90-minute quarter is marked with a subtle vertical line using extend.both.
+// We fire once per quarter boundary crossing (confirmed bar).
+
+var line[] qt_lines = array.new_line()
+var int    last_qt_quarter = -1
+
+if barstate.isconfirmed and i_qt_enabled
+    h   = hourInTZ()
+    m   = minuteInTZ()
+    // Calculate minutes since base hour
+    mins_since_base = (h - i_qt_base_hour) * 60 + m
+    // Handle negative (before base hour)
+    mins_since_base := mins_since_base < 0 ? mins_since_base + 1440 : mins_since_base
+    // Current quarter (0 = Q1, 1 = Q2, 2 = Q3, 3 = Q4)
+    cur_q = math.floor(mins_since_base / 90) % 4
+
+    if cur_q != last_qt_quarter
+        last_qt_quarter := cur_q
+        _qt_labels = array.from("Q1 Accum", "Q2 Manip", "Q3 Dist", "Q4 Rev")
+        _ql = line.new(
+             x1     = bar_index,
+             y1     = low,
+             x2     = bar_index,
+             y2     = high,
+             extend = extend.both,
+             color  = C_QT_LINE,
+             width  = 1,
+             style  = line.style_dashed)
+        array.push(qt_lines, _ql)
+
+        // Prune to last 20 QT lines
+        while array.size(qt_lines) > 20
+            line.delete(array.shift(qt_lines))
+
+// ============================================================================
+// ─── SECTION 3: FAIR VALUE GAP (FVG) DETECTION ───────────────────────────────
+// ============================================================================
+// Bullish FVG: low[0] > high[2]  (gap between candle[-2] high and candle[0] low)
+// Bearish FVG: high[0] < low[2]
+
+// We check on the PREVIOUS confirmed bar (index [1]) for non-repainting
+bullFVG = barstate.isconfirmed ? (low[1] > high[3] and close[2] > open[2]) : false
+bearFVG = barstate.isconfirmed ? (high[1] < low[3] and close[2] < open[2]) : false
+
+// FVG top/bottom for confluence
+fvg_bull_top    = bullFVG ? low[1]  : na
+fvg_bull_bot    = bullFVG ? high[3] : na
+fvg_bear_top    = bearFVG ? low[3]  : na
+fvg_bear_bot    = bearFVG ? high[1] : na
+
+// ============================================================================
+// ─── SECTION 4: ORDERBLOCK (OB) DETECTION ────────────────────────────────────
+// ============================================================================
+// An OB is the last opposing candle before an engulfing move that sweeps
+// prior liquidity.
+//
+// Bullish OB:  A bearish candle (close < open) that is fully engulfed by the
+//              following bullish candle AFTER sweeping a prior swing low.
+// Bearish OB:  A bullish candle (close > open) that is fully engulfed by the
+//              following bearish candle AFTER sweeping a prior swing high.
+//
+// Non-repainting: all checks use [1] history.
+
+var box[]   ob_boxes  = array.new_box()
+var label[] ob_labels = array.new_label()
+
+// Ghost preview box (single, re-created each bar if preview enabled)
+var box ghost_box = na
+
+// Detect prior swing liquidity sweep
+swingLow  = ta.lowest(low,  i_ob_lookback)[2]
+swingHigh = ta.highest(high, i_ob_lookback)[2]
+
+// ── Bullish OB Detection (evaluated on confirmed bar) ────────────────────────
+// Candle at [2]: bearish (the OB candidate)
+// Candle at [1]: bullish, engulfs [2], AND low[1] swept swingLow
+isBullOB = barstate.isconfirmed
+     and close[2] < open[2]                  // OB candle is bearish
+     and close[1] > open[1]                  // Engulfing candle is bullish
+     and close[1] > open[2]                  // Full engulf
+     and low[1]   < swingLow                 // Swept prior liquidity
+
+// ── Bearish OB Detection ──────────────────────────────────────────────────────
+isBearOB = barstate.isconfirmed
+     and close[2] > open[2]                  // OB candle is bullish
+     and close[1] < open[1]                  // Engulfing candle is bearish
+     and close[1] < open[2]                  // Full engulf
+     and high[1]  > swingHigh                // Swept prior liquidity
+
+// FVG confluence flag
+bullFVG_conf = bullFVG and isBullOB
+bearFVG_conf = bearFVG and isBearOB
+
+if isBullOB
+    _obTop    = math.max(open[2], close[2])
+    _obBot    = math.min(open[2], close[2])
+    _obLeft   = bar_index - 2
+    _obRight  = bar_index + i_ob_extend
+    _obColor  = bullFVG_conf ? C_OB_BULL_FVG : C_OB_BULL
+
+    _b = box.new(
+         left         = _obLeft,
+         top          = _obTop,
+         right        = _obRight,
+         bottom       = _obBot,
+         bgcolor      = _obColor,
+         border_color = C_NO_BORDER)
+    array.push(ob_boxes, _b)
+
+    _lbl = label.new(
+         x         = _obLeft,
+         y         = _obTop,
+         text      = bullFVG_conf ? "OB+FVG ▲" : "OB ▲",
+         style     = label.style_none,
+         color     = color.new(color.white,100),
+         textcolor = color.new(#00ffbb, 20),
+         size      = size.tiny)
+    array.push(ob_labels, _lbl)
+
+if isBearOB
+    _obTop    = math.max(open[2], close[2])
+    _obBot    = math.min(open[2], close[2])
+    _obLeft   = bar_index - 2
+    _obRight  = bar_index + i_ob_extend
+    _obColor  = bearFVG_conf ? C_OB_BEAR_FVG : C_OB_BEAR
+
+    _b = box.new(
+         left         = _obLeft,
+         top          = _obTop,
+         right        = _obRight,
+         bottom       = _obBot,
+         bgcolor      = _obColor,
+         border_color = C_NO_BORDER)
+    array.push(ob_boxes, _b)
+
+    _lbl = label.new(
+         x         = _obLeft,
+         y         = _obTop,
+         text      = bearFVG_conf ? "OB+FVG ▼" : "OB ▼",
+         style     = label.style_none,
+         color     = color.new(color.white,100),
+         textcolor = color.new(#ff3366, 20),
+         size      = size.tiny)
+    array.push(ob_labels, _lbl)
+
+// ── Ghost Preview (live, unclosed candle) ─────────────────────────────────────
+// Only draw ghost on the current unclosed bar if preview mode is on.
+// Remove it on barstate.isconfirmed (replaced by real OB or deleted).
+
+if i_preview_enabled
+    // Delete previous ghost on every bar (it will be re-created if needed)
+    if not na(ghost_box)
+        box.delete(ghost_box)
+        ghost_box := na
+
+    // Draw ghost only on the LIVE candle (not confirmed)
+    if not barstate.isconfirmed
+        // Potential bullish OB forming
+        potBull = close[1] < open[1] and close > open and close > open[1] and low < swingLow
+        potBear = close[1] > open[1] and close < open and close < open[1] and high > swingHigh
+
+        if potBull
+            ghost_box := box.new(
+                 left         = bar_index - 1,
+                 top          = math.max(open[1], close[1]),
+                 right        = bar_index + i_ob_extend,
+                 bottom       = math.min(open[1], close[1]),
+                 bgcolor      = C_OB_GHOST_BULL,
+                 border_color = C_NO_BORDER)
+        else if potBear
+            ghost_box := box.new(
+                 left         = bar_index - 1,
+                 top          = math.max(open[1], close[1]),
+                 right        = bar_index + i_ob_extend,
+                 bottom       = math.min(open[1], close[1]),
+                 bgcolor      = C_OB_GHOST_BEAR,
+                 border_color = C_NO_BORDER)
+
+// Prune old OB objects (keep last 30 boxes, 30 labels)
+if barstate.isconfirmed
+    while array.size(ob_boxes)  > 30
+        box.delete(array.shift(ob_boxes))
+    while array.size(ob_labels) > 30
+        label.delete(array.shift(ob_labels))
+
+// ============================================================================
+// ─── SECTION 5: LIT ENTRY SEQUENCE DETECTION ─────────────────────────────────
+// ============================================================================
+// Full sequence (all on confirmed bars):
+//   Step 1 – Inducement: Price creates a structural inducement high/low
+//   Step 2 – Liquidity Sweep (LS): Price sweeps that inducement level
+//   Step 3 – Break of Structure (BOS) in intended direction
+//   Step 4 – Price returns to POI (inside an OB)
+//
+// We track state-machine variables per direction.
+
+// ── State Machine Variables ───────────────────────────────────────────────────
+var float lit_bull_inducement = na   // Price level of bull inducement low
+var float lit_bear_inducement = na   // Price level of bear inducement high
+var bool  lit_bull_swept      = false
+var bool  lit_bear_swept      = false
+var bool  lit_bull_bos        = false
+var bool  lit_bear_bos        = false
+
+// Swing-point references (simple pivot detection, 5-bar)
+swPivotHigh = ta.pivothigh(high, 5, 5)
+swPivotLow  = ta.pivotlow(low,  5, 5)
+
+// ── Step 1: Identify Inducement ───────────────────────────────────────────────
+if barstate.isconfirmed
+    if not na(swPivotLow)
+        lit_bull_inducement := swPivotLow       // Most recent swing low = bull inducement
+    if not na(swPivotHigh)
+        lit_bear_inducement := swPivotHigh      // Most recent swing high = bear inducement
+
+// ── Step 2: Liquidity Sweep ───────────────────────────────────────────────────
+if barstate.isconfirmed
+    if not na(lit_bull_inducement)
+        if low[1] < lit_bull_inducement and close[1] > lit_bull_inducement
+            lit_bull_swept := true              // Wick swept below inducement, closed above
+    if not na(lit_bear_inducement)
+        if high[1] > lit_bear_inducement and close[1] < lit_bear_inducement
+            lit_bear_swept := true              // Wick swept above inducement, closed below
+
+// ── Step 3: Break of Structure ────────────────────────────────────────────────
+// After a bull sweep, BOS = current high breaks previous swing high
+var float bos_ref_high = na
+var float bos_ref_low  = na
+
+if barstate.isconfirmed
+    if lit_bull_swept and not lit_bull_bos
+        if not na(swPivotHigh) and high[1] > swPivotHigh
+            lit_bull_bos  := true
+            bos_ref_low   := lit_bull_inducement   // POI reference
+
+    if lit_bear_swept and not lit_bear_bos
+        if not na(swPivotLow) and low[1] < swPivotLow
+            lit_bear_bos  := true
+            bos_ref_high  := lit_bear_inducement   // POI reference
+
+// ── Step 4: Return to POI & Entry Signal ─────────────────────────────────────
+// Price returns to the OB zone after the BOS.
+// We check if current close [1] is inside the most recent OB box.
+
+var box[]  tp_sl_boxes  = array.new_box()
+var label[] tp_sl_labels = array.new_label()
+
+// We use plot_0 / plot_1 for alert placeholders (SL, TP price)
+var float alert_sl = na
+var float alert_tp = na
+var bool  lit_long_triggered  = false
+var bool  lit_short_triggered = false
+
+if barstate.isconfirmed and array.size(ob_boxes) > 0
+    _lastOB = array.get(ob_boxes, array.size(ob_boxes) - 1)
+
+    // ── LONG Entry ────────────────────────────────────────────────────────────
+    if lit_bull_swept and lit_bull_bos
+        _obTop = box.get_top(_lastOB)
+        _obBot = box.get_bottom(_lastOB)
+        // Price retrace back into OB
+        if close[1] <= _obTop and close[1] >= _obBot
+            _entry = close[1]
+            _sl    = _obBot - atr14 * i_sl_mult
+            _tp    = _entry + atr14 * i_tp_mult
+
+            alert_sl := _sl
+            alert_tp := _tp
+            lit_long_triggered := true
+
+            // ─── Draw SL Box (red, below entry) ───────────────────────────
+            _slBox = box.new(
+                 left         = bar_index - 1,
+                 top          = _entry,
+                 right        = bar_index + i_tp_extend,
+                 bottom       = _sl,
+                 bgcolor      = C_SL_BOX,
+                 border_color = C_NO_BORDER)
+            array.push(tp_sl_boxes, _slBox)
+
+            // ─── Draw TP Box (green, above entry) ─────────────────────────
+            _tpBox = box.new(
+                 left         = bar_index - 1,
+                 top          = _tp,
+                 right        = bar_index + i_tp_extend,
+                 bottom       = _entry,
+                 bgcolor      = C_TP_BOX,
+                 border_color = C_NO_BORDER)
+            array.push(tp_sl_boxes, _tpBox)
+
+            // Entry label
+            _eLbl = label.new(
+                 x         = bar_index - 1,
+                 y         = _entry,
+                 text      = "LONG POI",
+                 style     = label.style_label_right,
+                 color     = C_TP_BOX,
+                 textcolor = color.white,
+                 size      = size.tiny)
+            array.push(tp_sl_labels, _eLbl)
+
+            // Reset state machine
+            lit_bull_swept := false
+            lit_bull_bos   := false
+
+    // ── SHORT Entry ───────────────────────────────────────────────────────────
+    if lit_bear_swept and lit_bear_bos
+        _obTop = box.get_top(_lastOB)
+        _obBot = box.get_bottom(_lastOB)
+        if close[1] <= _obTop and close[1] >= _obBot
+            _entry = close[1]
+            _sl    = _obTop + atr14 * i_sl_mult
+            _tp    = _entry - atr14 * i_tp_mult
+
+            alert_sl := _sl
+            alert_tp := _tp
+            lit_short_triggered := true
+
+            _slBox = box.new(
+                 left         = bar_index - 1,
+                 top          = _sl,
+                 right        = bar_index + i_tp_extend,
+                 bottom       = _entry,
+                 bgcolor      = C_SL_BOX,
+                 border_color = C_NO_BORDER)
+            array.push(tp_sl_boxes, _slBox)
+
+            _tpBox = box.new(
+                 left         = bar_index - 1,
+                 top          = _entry,
+                 right        = bar_index + i_tp_extend,
+                 bottom       = _tp,
+                 bgcolor      = C_TP_BOX,
+                 border_color = C_NO_BORDER)
+            array.push(tp_sl_boxes, _tpBox)
+
+            _eLbl = label.new(
+                 x         = bar_index - 1,
+                 y         = _entry,
+                 text      = "SHORT POI",
+                 style     = label.style_label_right,
+                 color     = C_SL_BOX,
+                 textcolor = color.white,
+                 size      = size.tiny)
+            array.push(tp_sl_labels, _eLbl)
+
+            lit_bear_swept := false
+            lit_bear_bos   := false
+
+// Prune TP/SL boxes (keep last 20)
+if barstate.isconfirmed
+    while array.size(tp_sl_boxes)  > 20
+        box.delete(array.shift(tp_sl_boxes))
+    while array.size(tp_sl_labels) > 10
+        label.delete(array.shift(tp_sl_labels))
+
+// ============================================================================
+// ─── SECTION 6: SMT DIVERGENCE ───────────────────────────────────────────────
+// ============================================================================
+// Compare main symbol swing lows/highs with correlated asset.
+// Non-repainting: use [1] history and barstate.isconfirmed.
+
+var label[] smt_labels = array.new_label()
+
+corr_high = request.security(i_smt_symbol, timeframe.period, high, lookahead=barmerge.lookahead_off)
+corr_low  = request.security(i_smt_symbol, timeframe.period, low,  lookahead=barmerge.lookahead_off)
+
+if barstate.isconfirmed and i_smt_enabled
+    // Bullish SMT: Main creates Lower Low, Correlated fails to make Lower Low
+    mainLL  = low[1]  < ta.lowest(low,  i_smt_lookback)[2]
+    corrHL  = corr_low[1] > ta.lowest(corr_low, i_smt_lookback)[2]
+    smtBull = mainLL and corrHL
+
+    // Bearish SMT: Main creates Higher High, Correlated fails to make Higher High
+    mainHH  = high[1] > ta.highest(high, i_smt_lookback)[2]
+    corrLH  = corr_high[1] < ta.highest(corr_high, i_smt_lookback)[2]
+    smtBear = mainHH and corrLH
+
+    if smtBull
+        _lbl = label.new(
+             x         = bar_index - 1,
+             y         = low[1],
+             text      = "SMT ▲",
+             style     = label.style_label_up,
+             color     = C_SMT_BULL,
+             textcolor = color.white,
+             size      = size.tiny)
+        array.push(smt_labels, _lbl)
+
+    if smtBear
+        _lbl = label.new(
+             x         = bar_index - 1,
+             y         = high[1],
+             text      = "SMT ▼",
+             style     = label.style_label_down,
+             color     = C_SMT_BEAR,
+             textcolor = color.white,
+             size      = size.tiny)
+        array.push(smt_labels, _lbl)
+
+    // Prune
+    while array.size(smt_labels) > 20
+        label.delete(array.shift(smt_labels))
+
+// ============================================================================
+// ─── SECTION 7: ALERT SYSTEM (Webhook / Bot Ready) ───────────────────────────
+// ============================================================================
+// Structured JSON payload compatible with most webhook bots (e.g., 3Commas,
+// Alertatron, custom servers). Uses dynamic Pine placeholders for live values.
+//
+// Note: plot() is required ONLY for the alert placeholder variables (SL, TP).
+// These are plotted with display=display.none so they appear in alert
+// templates as {{plot_0}} and {{plot_1}} without cluttering the chart.
+
+plot(alert_sl, title="SL Reference", display=display.none)
+plot(alert_tp, title="TP Reference", display=display.none)
+
+// ── Long Alert ────────────────────────────────────────────────────────────────
+if lit_long_triggered
+    alert(
+         '{"action":"long","symbol":"' + syminfo.ticker +
+         '","entry":' + str.tostring(math.round(close, 2)) +
+         ',"sl":' + str.tostring(math.round(alert_sl, 2)) +
+         ',"tp":' + str.tostring(math.round(alert_tp, 2)) +
+         ',"strategy":"ISC1.0-LIT","timeframe":"' + timeframe.period + '"}',
+         alert.freq_once_per_bar_close)
+
+// ── Short Alert ───────────────────────────────────────────────────────────────
+if lit_short_triggered
+    alert(
+         '{"action":"short","symbol":"' + syminfo.ticker +
+         '","entry":' + str.tostring(math.round(close, 2)) +
+         ',"sl":' + str.tostring(math.round(alert_sl, 2)) +
+         ',"tp":' + str.tostring(math.round(alert_tp, 2)) +
+         ',"strategy":"ISC1.0-LIT","timeframe":"' + timeframe.period + '"}',
+         alert.freq_once_per_bar_close)
+
+// ── SMT Alert ────────────────────────────────────────────────────────────────
+// (fired separately so bots can use it as a confluence filter)
+if barstate.isconfirmed and i_smt_enabled
+    mainLL_a  = low[1]  < ta.lowest(low,  i_smt_lookback)[2]
+    corrHL_a  = corr_low[1] > ta.lowest(corr_low, i_smt_lookback)[2]
+    if mainLL_a and corrHL_a
+        alert(
+             '{"action":"smt_bull","symbol":"' + syminfo.ticker +
+             '","corr":"' + i_smt_symbol + '","timeframe":"' + timeframe.period + '"}',
+             alert.freq_once_per_bar_close)
+
+    mainHH_a  = high[1] > ta.highest(high, i_smt_lookback)[2]
+    corrLH_a  = corr_high[1] < ta.highest(corr_high, i_smt_lookback)[2]
+    if mainHH_a and corrLH_a
+        alert(
+             '{"action":"smt_bear","symbol":"' + syminfo.ticker +
+             '","corr":"' + i_smt_symbol + '","timeframe":"' + timeframe.period + '"}',
+             alert.freq_once_per_bar_close)
+
+// ============================================================================
+// END OF ISC 1.0 INDICATOR
+// ============================================================================
+// HOW TO USE:
+//   1. Paste this script into TradingView Pine Editor.
+//   2. Add to chart on XAUUSD (or any liquid instrument).
+//   3. Recommended timeframes: 5m, 15m, 1H.
+//   4. To use alerts: right-click indicator → Add Alert → select
+//      "ISC 1.0" → paste the alert message template you need.
+//   5. For webhook bots, set the alert "Message" field to the JSON
+//      payload (already structured in the alert() calls above).
+//
+// IMPORTANT NOTES:
+//   • All conditions evaluate on barstate.isconfirmed → no repainting.
+//   • Ghost preview boxes appear on live candle and self-delete on close.
+//   • TP/SL boxes are permanent historical records – they never move.
+//   • OB boxes extend i_ob_extend bars into the future automatically.
+//   • Memory is managed by pruning arrays to bounded sizes.
+// ============================================================================
